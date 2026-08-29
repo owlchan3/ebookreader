@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Book shape -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,30 L78,30 L78,78 L54,72 L30,78 Z" />
+    <path
+        android:fillColor="#5B4636"
+        android:pathData="M34,34 L54,34 L54,68 L34,72 Z" />
+    <path
+        android:fillColor="#8B6F47"
+        android:pathData="M54,34 L74,34 L74,72 L54,68 Z" />
+</vector>
