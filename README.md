@@ -241,33 +241,6 @@ ebook-reader/
 - Android SDK：`compileSdk 36` / `minSdk 26`（Android 8.0）/ `targetSdk 36`
 - 使用仓库自带 Gradle Wrapper（Gradle 9.1.0），无需单独安装
 
-## 构建
-
-```bash
-# Debug（可直接安装测试）
-./gradlew assembleDebug
-# 输出：app/build/outputs/apk/debug/app-debug.apk
-
-# Release（需配置签名，见下）
-./gradlew assembleRelease
-# 输出：app/build/outputs/apk/release/app-release.apk
-```
-
-## Release 签名
-
-正式版 APK 需要签名，仓库**不包含**签名密钥（安全考虑）。你需要自备：
-
-1. 在项目根目录创建 `keystore.properties`：
-   ```properties
-   storeFile=keystore/release.jks
-   storePassword=你的密码
-   keyAlias=你的别名
-   keyPassword=你的密码
-   ```
-2. 把签名文件放到 `keystore/release.jks`。
-
-> `keystore.properties`、`keystore/`、`*.jks`、`*.keystore` 已在 `.gitignore` 中忽略，不会被提交。没有密钥时 `assembleDebug` 不受影响；`assembleRelease` 会因无签名而失败。
-
 ## 下载
 
 预构建的 APK 见 [Releases](https://github.com/owlchan3/EBookReader/releases)。
