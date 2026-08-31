@@ -44,8 +44,3 @@
 ## 下载
 
 预构建的 APK 见 [Releases](https://github.com/owlchan3/EBookReader/releases)。
-
-## 许可
-
-- `readium-kit/` 下的 Readium Kotlin Toolkit 采用 [BSD 许可证](readium-kit/LICENSE)。
-- 应用代码（`app/`）目前未指定许可证，如需开源请自行添加 `LICENSE` 文件。
