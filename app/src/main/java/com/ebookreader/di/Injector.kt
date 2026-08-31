@@ -5,10 +5,12 @@ import com.ebookreader.data.local.AppDatabase
 import com.ebookreader.data.network.ApiKeyManager
 import com.ebookreader.data.network.CloudTtsClient
 import com.ebookreader.data.network.DeepSeekClient
+import com.ebookreader.data.repository.AnnotationRepositoryImpl
 import com.ebookreader.data.repository.BookRepositoryImpl
 import com.ebookreader.data.repository.BookmarkRepositoryImpl
 import com.ebookreader.data.repository.ChatRepositoryImpl
 import com.ebookreader.data.repository.TagRepositoryImpl
+import com.ebookreader.domain.repository.AnnotationRepository
 import com.ebookreader.domain.repository.BookRepository
 import com.ebookreader.domain.repository.BookmarkRepository
 import com.ebookreader.domain.repository.ChatRepository
@@ -19,6 +21,7 @@ object Injector {
     private var bookRepository: BookRepository? = null
     private var tagRepository: TagRepository? = null
     private var bookmarkRepository: BookmarkRepository? = null
+    private var annotationRepository: AnnotationRepository? = null
     private var chatRepository: ChatRepository? = null
     private var apiKeyManager: ApiKeyManager? = null
     private var deepSeekClient: DeepSeekClient? = null
@@ -29,6 +32,7 @@ object Injector {
         bookRepository = BookRepositoryImpl(database!!.bookDao())
         tagRepository = TagRepositoryImpl(database!!.tagDao())
         bookmarkRepository = BookmarkRepositoryImpl(database!!.bookmarkDao())
+        annotationRepository = AnnotationRepositoryImpl(database!!.annotationDao())
         apiKeyManager = ApiKeyManager(context)
         deepSeekClient = DeepSeekClient(apiKeyManager!!)
         cloudTtsClient = CloudTtsClient(apiKeyManager!!)
@@ -42,6 +46,9 @@ object Injector {
         ?: throw IllegalStateException("Injector not initialized. Call Injector.init(context) first.")
 
     fun bookmarkRepository(): BookmarkRepository = bookmarkRepository
+        ?: throw IllegalStateException("Injector not initialized. Call Injector.init(context) first.")
+
+    fun annotationRepository(): AnnotationRepository = annotationRepository
         ?: throw IllegalStateException("Injector not initialized. Call Injector.init(context) first.")
 
     fun chatRepository(): ChatRepository = chatRepository

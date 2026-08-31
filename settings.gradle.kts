@@ -22,8 +22,8 @@ dependencyResolutionManagement {
     }
 }
 
-// Composite build: use local Readium source instead of published artifacts
-includeBuild("../readium-kit/kotlin-toolkit-develop")
+// Composite build: use vendored Readium source instead of published artifacts
+includeBuild("readium-kit")
 
 rootProject.name = "EBookReader"
 include(":app")

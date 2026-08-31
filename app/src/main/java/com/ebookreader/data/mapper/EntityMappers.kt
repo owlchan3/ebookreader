@@ -1,5 +1,6 @@
 package com.ebookreader.data.mapper
 
+import com.ebookreader.data.local.entity.AnnotationEntity
 import com.ebookreader.data.local.entity.BookChunkEntity
 import com.ebookreader.data.local.entity.BookEntity
 import com.ebookreader.data.local.entity.BookmarkEntity
@@ -8,8 +9,10 @@ import com.ebookreader.data.local.entity.ChatMessageEntity
 import com.ebookreader.data.local.entity.ConversationEntity
 import com.ebookreader.data.local.entity.TagEntity
 import com.ebookreader.data.local.entity.TagGroupEntity
+import com.ebookreader.domain.model.Annotation
 import com.ebookreader.domain.model.Book
 import com.ebookreader.domain.model.BookChunk
+import com.ebookreader.domain.model.AnnotationStyle
 import com.ebookreader.domain.model.Bookmark
 import com.ebookreader.domain.model.Chapter
 import com.ebookreader.domain.model.ChatMessage
@@ -98,6 +101,30 @@ fun Bookmark.toEntity(): BookmarkEntity = BookmarkEntity(
     title = title,
     note = note,
     locatorJson = locatorJson,
+    createdTimestamp = createdTimestamp,
+)
+
+fun AnnotationEntity.toDomain(): Annotation = Annotation(
+    id = id,
+    bookId = bookId,
+    locatorJson = locatorJson,
+    selectedText = selectedText,
+    pageIndex = pageIndex,
+    style = runCatching { AnnotationStyle.valueOf(style) }.getOrDefault(AnnotationStyle.HIGHLIGHT),
+    color = color,
+    note = note,
+    createdTimestamp = createdTimestamp,
+)
+
+fun Annotation.toEntity(): AnnotationEntity = AnnotationEntity(
+    id = id,
+    bookId = bookId,
+    locatorJson = locatorJson,
+    selectedText = selectedText,
+    pageIndex = pageIndex,
+    style = style.name,
+    color = color,
+    note = note,
     createdTimestamp = createdTimestamp,
 )
 

@@ -1,6 +1,10 @@
 package com.ebookreader.ui.settings
 
+import android.app.Activity
+import android.content.Intent
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -33,8 +37,10 @@ import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -74,6 +80,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ebookreader.data.network.PreferredGenre
 import com.ebookreader.domain.model.Tag
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -86,6 +95,18 @@ fun SettingsScreen(
     var isDarkTheme by remember { mutableStateOf(false) }
     var autoNightMode by remember { mutableStateOf(true) }
     val context = LocalContext.current
+
+    val backupMessage by viewModel.backupMessage.collectAsState()
+    val isBackingUp by viewModel.isBackingUp.collectAsState()
+
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.data?.let { viewModel.exportBackup(it) }
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { viewModel.importBackup(it) }
+    }
 
     val tags by viewModel.tags.collectAsState()
     var showCreateTagDialog by remember { mutableStateOf(false) }
@@ -470,6 +491,24 @@ fun SettingsScreen(
                 onClick = { viewModel.refreshBookIndexCounts(); showDeleteIndexDialog = true })
             SettingsItem(Icons.Default.DeleteSweep, "清空全部索引", "删除所有书的检索索引并回收空间",
                 onClick = { showClearAllIndexDialog = true })
+            SettingsItem(Icons.Default.Backup, "导出备份", "把书库、书签、设置打包保存为一个文件",
+                onClick = {
+                    val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "application/zip"
+                        putExtra(
+                            Intent.EXTRA_TITLE,
+                            "EBookReader_backup_${SimpleDateFormat("yyyyMMdd_HHmm", Locale.US).format(Date())}.zip"
+                        )
+                    }
+                    exportLauncher.launch(intent)
+                },
+                trailing = if (isBackingUp) {
+                    { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) }
+                } else null,
+            )
+            SettingsItem(Icons.Default.Restore, "导入备份", "从备份文件恢复（会覆盖当前所有数据）",
+                onClick = { importLauncher.launch(arrayOf("*/*")) })
 
             Spacer(Modifier.height(20.dp))
             SettingsSection("关于")
@@ -1397,6 +1436,18 @@ fun SettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showReadTagIntro = false }) { Text("知道了") }
+            },
+        )
+    }
+
+    // 备份 / 恢复结果对话框
+    backupMessage?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { viewModel.clearBackupMessage() },
+            title = { Text("备份与恢复") },
+            text = { Text(msg) },
+            confirmButton = {
+                TextButton(onClick = { viewModel.clearBackupMessage() }) { Text("知道了") }
             },
         )
     }

@@ -7,6 +7,7 @@ import android.media.MediaPlayer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.provider.Settings
+import android.text.Html
 import androidx.compose.runtime.snapshotFlow
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -16,8 +17,11 @@ import com.ebookreader.data.local.entity.DailyReadingSessionEntity
 import com.ebookreader.data.importer.BookImporter
 import com.ebookreader.data.network.ApiKeyManager
 import com.ebookreader.di.Injector
+import com.ebookreader.domain.model.Annotation
+import com.ebookreader.domain.model.AnnotationStyle
 import com.ebookreader.domain.model.Book
 import com.ebookreader.domain.model.Bookmark
+import com.ebookreader.domain.repository.AnnotationRepository
 import com.ebookreader.domain.repository.BookRepository
 import com.ebookreader.domain.repository.BookmarkRepository
 import kotlinx.coroutines.Dispatchers
@@ -41,11 +45,13 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicInteger
 import org.readium.adapter.pdfium.document.PdfiumDocumentFactory
+import org.readium.navigator.web.common.WebDecorationTemplates
 import org.readium.navigator.web.fixedlayout.FixedWebConfiguration
 import org.readium.navigator.web.fixedlayout.FixedWebGoLocation
 import org.readium.navigator.web.fixedlayout.FixedWebRenditionFactory
 import org.readium.navigator.web.fixedlayout.FixedWebRenditionState
 import org.readium.navigator.web.reflowable.ReflowableWebConfiguration
+import org.readium.navigator.web.reflowable.ReflowableWebDecorationLocation
 import org.readium.navigator.web.reflowable.ReflowableWebGoLocation
 import org.readium.navigator.web.reflowable.ReflowableWebLocation
 import org.readium.navigator.web.reflowable.ReflowableWebRenditionController
@@ -55,8 +61,12 @@ import org.readium.navigator.web.reflowable.preferences.ReflowableWebPreferences
 import org.readium.r2.shared.ExperimentalReadiumApi
 import org.readium.navigator.common.Decoration
 import org.readium.navigator.common.Progression
+import org.readium.navigator.common.TextAnchor
+import org.readium.navigator.common.TextQuote
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.persistentMapOf
+import kotlinx.collections.immutable.toPersistentList
+import kotlinx.collections.immutable.toPersistentMap
 import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.publication.Publication
 import org.readium.r2.shared.publication.services.search.SearchIterator
@@ -98,6 +108,9 @@ data class TocItem(val title: String, val href: String, val level: Int = 0, val 
 
 data class SearchResultItem(val title: String, val locatorJson: String, val locator: Locator)
 
+/** 待处理的文字选择：用户点「划线/批注」后暂存，等待选择样式/颜色或输入笔记。 */
+data class PendingSelection(val text: String, val locator: Locator, val pageIndex: Int)
+
 
 sealed class TtsPlaybackState {
     data object Idle : TtsPlaybackState()
@@ -119,6 +132,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     private val bookRepository: BookRepository = Injector.bookRepository()
     private val bookmarkRepository: BookmarkRepository = Injector.bookmarkRepository()
+    private val annotationRepository: AnnotationRepository = Injector.annotationRepository()
 
     private val _book = MutableStateFlow<Book?>(null)
     val book: StateFlow<Book?> = _book.asStateFlow()
@@ -128,6 +142,18 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _bookmarks = MutableStateFlow<List<Bookmark>>(emptyList())
     val bookmarks: StateFlow<List<Bookmark>> = _bookmarks.asStateFlow()
+
+    private val _annotations = MutableStateFlow<List<Annotation>>(emptyList())
+    val annotations: StateFlow<List<Annotation>> = _annotations.asStateFlow()
+
+    private val _pendingHighlight = MutableStateFlow<PendingSelection?>(null)
+    val pendingHighlight: StateFlow<PendingSelection?> = _pendingHighlight.asStateFlow()
+
+    private val _pendingAnnotation = MutableStateFlow<PendingSelection?>(null)
+    val pendingAnnotation: StateFlow<PendingSelection?> = _pendingAnnotation.asStateFlow()
+
+    /** 当前 TTS 高亮装饰；与批注装饰合并渲染，避免互相覆盖。 */
+    private var ttsDecor: Decoration<ReflowableWebDecorationLocation>? = null
 
     private val _currentPageLabel = MutableStateFlow("")
     val currentPageLabel: StateFlow<String> = _currentPageLabel.asStateFlow()
@@ -235,6 +261,8 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     private var ttsChapterIndex: Int = -1
     /** Maps each sentence index to its visual page (within the chapter). */
     private var ttsSentencePage: IntArray = intArrayOf()
+    /** Maps each sentence index to its start progression (0..1) within the chapter, for scroll mode. */
+    private var ttsSentenceProgression: DoubleArray = DoubleArray(0)
     /** Total visual pages in all chapters before the current TTS chapter. */
     private var ttsPrevPageCount: Int = 0
     /** Last global page we flipped to (anti-pump). */
@@ -247,6 +275,8 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     private var ttsUseFallback: Boolean = false
     /** Cumulative character counts for time→sentence mapping. Entry [k] = chars before sentence k. */
     private var ttsCumChars: LongArray = LongArray(0)
+    /** 本地整章 WAV 每句的累计起始时间（毫秒），由各批真实时长折算；供单文件播放/seek 精确定位。 */
+    private var ttsSingleTimesMs: LongArray? = null
 
     private val _ttsState = MutableStateFlow<TtsPlaybackState>(TtsPlaybackState.Idle)
     val ttsState: StateFlow<TtsPlaybackState> = _ttsState.asStateFlow()
@@ -277,6 +307,12 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         }
         viewModelScope.launch {
             bookmarkRepository.getBookmarksForBook(bookId).collect { _bookmarks.value = it }
+        }
+        viewModelScope.launch {
+            annotationRepository.getAnnotationsForBook(bookId).collect {
+                _annotations.value = it
+                refreshDecorations()
+            }
         }
     }
 
@@ -495,6 +531,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                         snapshotFlow { state.controller }.collect { ctrl ->
                             if (ctrl != null) {
                                 _uiState.value = ReaderUiState.Ready(publication, state, ctrl)
+                                refreshDecorations()
                                 snapshotFlow { ctrl.location }.collect { loc ->
                                     try {
                                         currentLocator = loc.toLocator()
@@ -943,6 +980,111 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         } catch (_: Exception) { null }
     }
 
+    // Annotations (highlight / underline / wavy / note)
+    fun onHighlightRequested(text: String, locator: Locator) {
+        _pendingHighlight.value = PendingSelection(text, locator, _currentPageIndex.value)
+    }
+
+    fun onAnnotateRequested(text: String, locator: Locator) {
+        _pendingAnnotation.value = PendingSelection(text, locator, _currentPageIndex.value)
+    }
+
+    fun dismissPendingHighlight() { _pendingHighlight.value = null }
+    fun dismissPendingAnnotation() { _pendingAnnotation.value = null }
+
+    fun applyHighlight(style: AnnotationStyle, color: Int) {
+        val pending = _pendingHighlight.value ?: return
+        val book = _book.value ?: return
+        viewModelScope.launch {
+            annotationRepository.insertAnnotation(
+                Annotation(
+                    bookId = book.id,
+                    locatorJson = locatorToJson(pending.locator),
+                    selectedText = pending.text,
+                    pageIndex = pending.pageIndex,
+                    style = style,
+                    color = color,
+                    note = "",
+                )
+            )
+        }
+        _pendingHighlight.value = null
+    }
+
+    fun saveAnnotation(note: String, style: AnnotationStyle, color: Int) {
+        val pending = _pendingAnnotation.value ?: return
+        val book = _book.value ?: return
+        viewModelScope.launch {
+            annotationRepository.insertAnnotation(
+                Annotation(
+                    bookId = book.id,
+                    locatorJson = locatorToJson(pending.locator),
+                    selectedText = pending.text,
+                    pageIndex = pending.pageIndex,
+                    style = style,
+                    color = color,
+                    note = note,
+                )
+            )
+        }
+        _pendingAnnotation.value = null
+    }
+
+    fun editAnnotation(annotationId: Long, note: String, style: AnnotationStyle, color: Int) {
+        viewModelScope.launch {
+            annotationRepository.updateAnnotation(annotationId, note, style, color)
+        }
+    }
+
+    fun removeAnnotation(annotationId: Long) {
+        viewModelScope.launch { annotationRepository.deleteAnnotation(annotationId) }
+    }
+
+    /** 批注所在页码标签（如 "189 / 1987"）。页码在创建时固化，跳转用 pageIndex 即可。 */
+    fun annotationPageLabel(annotation: Annotation): String {
+        val total = _totalPages.value
+        return if (total > 0) {
+            "${annotation.pageIndex.coerceIn(0, total - 1) + 1} / $total"
+        } else {
+            "${annotation.pageIndex + 1}"
+        }
+    }
+
+    private fun locatorToJson(locator: Locator): String =
+        try { locator.toJSON().toString() } catch (_: Exception) { "{}" }
+
+    private fun annotationToDecoration(ann: Annotation): Decoration<ReflowableWebDecorationLocation>? {
+        val loc = try {
+            Locator.fromJSON(JSONObject(ann.locatorJson))
+        } catch (_: Exception) { null } ?: return null
+        val textQuote = TextQuote(
+            text = loc.text.highlight ?: ann.selectedText,
+            prefix = loc.text.before.orEmpty(),
+            suffix = loc.text.after.orEmpty(),
+        )
+        val decLoc = ReflowableWebDecorationLocation(href = loc.href, textQuote = textQuote, cssSelector = null)
+        val style: Decoration.Style = when (ann.style) {
+            AnnotationStyle.HIGHLIGHT -> Decoration.Style.Highlight(tint = ann.color)
+            AnnotationStyle.UNDERLINE -> Decoration.Style.Underline(tint = ann.color)
+            AnnotationStyle.WAVY -> WavyUnderlineStyle(tint = ann.color)
+        }
+        return Decoration(id = Decoration.Id("ann-${ann.id}"), location = decLoc, style = style)
+    }
+
+    /** 合并「批注」与「TTS」两组装饰后整体下发，避免互相覆盖。 */
+    private fun refreshDecorations() {
+        val s = _uiState.value
+        if (s !is ReaderUiState.Ready || s.controller == null) return
+
+        val annDecorations = _annotations.value.mapNotNull { annotationToDecoration(it) }
+        val groups = buildMap {
+            if (annDecorations.isNotEmpty()) put("annotations", annDecorations.toPersistentList())
+            ttsDecor?.let { put("tts", persistentListOf(it)) }
+        }
+
+        s.controller.decorations = groups.toPersistentMap()
+    }
+
     // Preferences
     fun applyFontSize(size: Double) {
         _fontSize.value = size
@@ -951,7 +1093,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             "dark" -> darkBeigeTheme
             else -> ReflowableWebPreferences()
         }
-        val newPrefs = base + ReflowableWebPreferences(fontSize = size)
+        val newPrefs = base + ReflowableWebPreferences(fontSize = size, scroll = _scrollMode.value)
         _preferences.value = newPrefs
         val s = _uiState.value
         if (s is ReaderUiState.Ready && s.controller != null) s.controller.preferences = newPrefs
@@ -984,7 +1126,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             "dark" -> darkBeigeTheme
             else -> ReflowableWebPreferences()
         }
-        val merged = base + ReflowableWebPreferences(fontSize = _fontSize.value)
+        val merged = base + ReflowableWebPreferences(fontSize = _fontSize.value, scroll = _scrollMode.value)
         _preferences.value = merged
         val s = _uiState.value
         if (s is ReaderUiState.Ready && s.controller != null) s.controller.preferences = merged
@@ -1226,18 +1368,43 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         ttsChapterIndex = chapterIdx
         val counts = pageCounts()
         ttsPrevPageCount = counts.take(chapterIdx).sum()
+
+        // 起始句定位按模式分开：
+        // - 翻页模式：二分实测「第一个渲染进度 ≥ 当前页顶」的句子（=本页第一句）。
+        // - 滚动模式：二分实测「第一个渲染进度 ≥ 可见区顶」的句子（从当下可见文本开始）。
+        // 二者共用二分实测（log2(N) 次 JS），长章节也毫秒级、且无插值漂移；测量失败回退字符比例。
         buildSentencePageMapping(chapterIdx, sentences.size)
+        viewModelScope.launch {
+            val currentGlobalPage = _currentPageIndex.value
+            val state = _uiState.value as? ReaderUiState.Ready
+            val ctrl = state?.controller
+            val chapterUrl = pub.readingOrder.getOrNull(chapterIdx)?.url()
+            // 目标：当前视口顶部的渲染进度（翻页模式=当前页顶，滚动模式=可见区顶）。
+            val target = ctrl?.viewport?.progressions?.get(chapterUrl)?.start?.value
+            val fallback = if (_scrollMode.value) {
+                val topProg = target ?: currentLocator?.locations?.progression ?: 0.0
+                ttsSentenceProgression.indexOfFirst { it >= topProg }
+                    .let { if (it < 0) sentences.size - 1 else it }
+            } else {
+                val pageInChapter = (currentGlobalPage - ttsPrevPageCount).coerceAtLeast(0)
+                ttsSentencePage.indexOfFirst { it >= pageInChapter }
+                    .let { if (it < 0) sentences.size - 1 else it }
+            }
+            val startIdx = if (ctrl != null && target != null) {
+                findFirstSentenceAtOrAfter(ctrl, target, sentences.size, fallback)
+            } else {
+                fallback
+            }
+            ttsLastFlippedPage = currentGlobalPage
+            ttsCurrentIdx = startIdx
 
-        val currentGlobalPage = _currentPageIndex.value
-        val chPageCount = counts.getOrNull(chapterIdx)?.coerceAtLeast(1) ?: 1
-        val pageInChapter = (currentGlobalPage - ttsPrevPageCount).coerceIn(0, chPageCount - 1)
-        var startIdx = ttsSentencePage.indexOfFirst { it >= pageInChapter }
-            .let { if (it < 0) sentences.size - 1 else it }
-        ttsLastFlippedPage = currentGlobalPage
-        ttsCurrentIdx = startIdx
-
-        goToPage(currentGlobalPage)
-        beginTtsSynthesis(startIdx)
+            // 翻页模式：跳回当前页保证视图一致；滚动模式：不移动屏幕，保持当前滚动位置，
+            // 从当下可见内容开始朗读（startIdx 已由可见区顶部渲染进度二分定位）。
+            if (!_scrollMode.value) {
+                goToPage(currentGlobalPage)
+            }
+            beginTtsSynthesis(startIdx)
+        }
     }
 
     /**
@@ -1365,27 +1532,41 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                     return@launch
                 }
 
-                // 首句单独合成（把等待压到接近单句生成时间），到手即播；
-                // 中段（头段剩余）逐句并发以便快速就绪，尾段后台合成，按序无缝衔接。
+                // 后续段先行后台合成（与首句并行），首句播完即可无缝接续，避免「读满头句后卡住」的空档。
+                // 段切分：第 2 句单独（首句约 1~2 秒播完时已就绪）；头部剩余句合并成一批，让出 permit 给
+                // 第一批次并行合成。若头部 5 句逐个单句合成，会占满 3 个 permit 分两波（2×网络延迟），
+                // 第一批次要等两波做完才开跑，网络稍慢时句 3~5 处必然断档卡顿。
+                val segSemaphore = Semaphore(CLOUD_TTS_CONCURRENCY)
+                val later = mutableListOf<Pair<Int, Deferred<SynthRange?>>>()
+                val headEnd = startIdx + CLOUD_TTS_HEAD_SENTENCES
+                var segStart = startIdx + 1
+                while (segStart < ttsSentences.size) {
+                    val segCount = when {
+                        // 第 2 句单独：首句约 1~2 秒播完时已就绪，可直接接上。
+                        segStart == startIdx + 1 -> 1
+                        // 头部剩余句（句 2..headEnd-1）合成一批：把原来的 N 个单句请求压缩成 1 次，
+                        // 让第 3 个 permit 立即给第一批次，消除「两波合成 + 批次等 permit」的 2×延迟。
+                        segStart < headEnd ->
+                            minOf(headEnd - segStart, ttsSentences.size - segStart)
+                        else -> minOf(TTS_BATCH_SIZE, ttsSentences.size - segStart)
+                    }
+                    val from = segStart
+                    later.add(from to async(Dispatchers.IO) {
+                        segSemaphore.withPermit {
+                            synthesizeCloudRange(cacheDir, from, segCount, batchSize = TTS_BATCH_SIZE)
+                        }
+                    })
+                    segStart += segCount
+                }
+
+                // 首句单独合成（把等待压到接近单句生成时间），到手即播。
                 _ttsSynthesisProgress.value = "正在准备朗读…"
                 val first = withContext(Dispatchers.IO) {
                     synthesizeCloudRange(cacheDir, startIdx, 1)
                 }
-                if (first == null) return@launch
-
-                val headSent = minOf(CLOUD_TTS_HEAD_SENTENCES, total)
-                val later = mutableListOf<Pair<Int, Deferred<SynthRange?>>>()
-                val midCount = headSent - 1
-                if (midCount > 0) {
-                    later.add(startIdx + 1 to async(Dispatchers.IO) {
-                        synthesizeCloudRange(cacheDir, startIdx + 1, midCount, batchSize = 1)
-                    })
-                }
-                val tailCount = total - headSent
-                if (tailCount > 0) {
-                    later.add(startIdx + headSent to async(Dispatchers.IO) {
-                        synthesizeCloudRange(cacheDir, startIdx + headSent, tailCount)
-                    })
+                if (first == null) {
+                    later.forEach { it.second.cancel() }
+                    return@launch
                 }
 
                 playStreaming(first, later, startIdx)
@@ -1435,9 +1616,114 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * 由各批次 WAV 的真实时长，按批内字符比例折算每句的累计起始时间（相对 [fromIdx]）。
-     * 返回 size = count+1 的数组，末元素为整段总时长。云端逐句时长不均匀，
-     * 用真实时长而非全段字符比例，可避免高光/翻页随时间累积漂移。
+     * 检测 WAV 内所有静音段 [startMs, endMs]（按时间升序，相对文件起点）。
+     * 静音段 = 连续低幅值采样 >= 200ms。仅处理 8/16-bit PCM，解析失败返回 null。
+     * 句边界由 buildCumTimesMs 按字符比例估计位置就近匹配，这里只做纯检测。
+     */
+    private fun detectSilenceRuns(file: File): List<LongArray>? {
+        val bytes = try {
+            file.readBytes()
+        } catch (_: Exception) {
+            return null
+        }
+        if (bytes.size < 44) return null
+        val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        if (buf.getInt() != 0x46464952) return null // "RIFF"
+        buf.getInt()
+        if (buf.getInt() != 0x45564157) return null // "WAVE"
+
+        var channels = 1
+        var sampleRate = 16000
+        var bits = 16
+        var dataOffset = -1
+        var dataSize = 0
+        while (buf.position() + 8 <= bytes.size) {
+            val id = ByteArray(4)
+            buf.get(id)
+            val size = buf.getInt()
+            when (String(id)) {
+                "fmt " -> {
+                    val s = buf.position()
+                    buf.getShort() // audioFormat
+                    channels = buf.getShort().toInt()
+                    sampleRate = buf.getInt()
+                    buf.getInt() // byteRate
+                    buf.getShort() // blockAlign
+                    bits = buf.getShort().toInt()
+                    buf.position(s + size)
+                }
+                "data" -> {
+                    dataOffset = buf.position()
+                    dataSize = size
+                    break
+                }
+                else -> buf.position(buf.position() + size + (size and 1))
+            }
+        }
+        if (dataOffset < 0 || dataSize <= 0 || (bits != 8 && bits != 16)) return null
+        val bps = bits / 8
+        val frame = bps * channels
+        if (frame <= 0) return null
+        val total = dataSize / frame
+        if (total <= 0) return null
+        val threshold = if (bits == 8) 4 else 200
+
+        fun amp(idx: Int): Int {
+            val base = dataOffset + idx * frame
+            var mx = 0
+            for (ch in 0 until channels) {
+                val off = base + ch * bps
+                val v = if (bits == 8) {
+                    (bytes[off].toInt() and 0xFF) - 128
+                } else {
+                    (bytes[off].toInt() and 0xFF) or (bytes[off + 1].toInt() shl 8)
+                }
+                val a = if (v < 0) -v else v
+                if (a > mx) mx = a
+            }
+            return mx
+        }
+
+        val minSilence = (sampleRate * 200L / 1000L).toInt().coerceAtLeast(1)
+        val runs = ArrayList<LongArray>() // [startMs, endMs]
+        var i = 0
+        while (i < total) {
+            if (amp(i) <= threshold) {
+                val start = i
+                while (i < total && amp(i) <= threshold) i++
+                if (i - start >= minSilence) {
+                    runs.add(longArrayOf(
+                        start.toLong() * 1000L / sampleRate,
+                        i.toLong() * 1000L / sampleRate,
+                    ))
+                }
+            } else {
+                i++
+            }
+        }
+        // 合并间隙 <= 100ms 的相邻静音段：句边界「。，」的句号停顿 + 逗号停顿常被极短间隙拆成两段，
+        // 不合并会取到前一段的结束（偏早半个停顿），导致边界提前。
+        val merged = ArrayList<LongArray>()
+        for (r in runs) {
+            if (merged.isEmpty()) {
+                merged.add(r)
+                continue
+            }
+            val prev = merged[merged.size - 1]
+            if (r[0] - prev[1] <= 100L) {
+                prev[1] = r[1]
+            } else {
+                merged.add(r)
+            }
+        }
+        return merged
+    }
+
+    /**
+     * 由各批次 WAV 的真实时长计算每句累计起始时间（相对 [fromIdx]）。
+     * 「字符比例锚定 + 静音精修」：先按批内字符比例估计每句边界的粗略位置，再在估计位置附近
+     * 找最近的静音段结束（= 下一句首音开始）作为精确边界。某句附近无静音段就退回该句的字符
+     * 比例估计值（不整批回退）。返回 size = count+1 的数组，末元素为整段总时长。
      */
     private fun buildCumTimesMs(
         files: List<File>,
@@ -1450,18 +1736,63 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         for (bi in batches.indices) {
             val range = batches[bi]
             val dur = wavDurationMs(files[bi])
-            var batchChars = 0L
-            for (si in range) {
-                val t = ttsSentences[si].trim()
-                batchChars += t.length.toLong() + (if (t.isNotEmpty()) 1L else 0L)
+            val n = range.last - range.first + 1
+
+            // 批内每句字符数（句末标点权重 +1），用于估计句边界位置。
+            val chars = LongArray(n)
+            var totalChars = 0L
+            for (k in 0 until n) {
+                val t = ttsSentences[range.first + k].trim()
+                val c = t.length.toLong() + (if (t.isNotEmpty()) 1L else 0L)
+                chars[k] = c
+                totalChars += c
             }
-            var before = 0L
-            for (si in range) {
-                val rel = si - fromIdx
-                val offset = if (batchChars > 0) before * dur / batchChars else 0L
-                cum[rel] = batchStart + offset.coerceIn(0L, dur)
-                val t = ttsSentences[si].trim()
-                before += t.length.toLong() + (if (t.isNotEmpty()) 1L else 0L)
+            // 相对批文件起点的每句估计起始毫秒。
+            val est = LongArray(n + 1)
+            var acc = 0L
+            for (k in 0 until n) {
+                est[k] = if (totalChars > 0) dur * acc / totalChars else 0L
+                acc += chars[k]
+            }
+            est[n] = dur
+
+            // 静音精修：每个估计边界附近选「最长」静音段结束（句末「。，」明显长于句内逗号），
+            // 并保持单调递增，避免相邻边界抢同一个静音段。某句附近无静音段则退回字符比例估计。
+            val runs = detectSilenceRuns(files[bi])
+            // boundary[k] = 句 k 与 k+1 之间边界的毫秒；-1 表示精修失败，退回该句的字符比例估计。
+            val boundary = LongArray(n - 1) { -1L }
+            if (runs != null && runs.isNotEmpty()) {
+                var prev = -1L
+                for (k in 0 until n - 1) {
+                    val target = est[k + 1]
+                    // 窗口 = 相邻句估计间隔的一半（下限 600ms），足够容纳「。，」停顿本身。
+                    val half = ((est[k + 1] - est[k]) / 2).coerceAtLeast(600L)
+                    var best = -1L
+                    for (r in runs) {
+                        val e = r[1]
+                        if (e <= prev) continue
+                        if (e < target - half || e > target + half) continue
+                        // 选窗口内「最靠后」的静音段结束（= 下一句首音）。句边界是「句号停顿+逗号停顿」，
+                        // 逗号停顿结束才是真正的下一句起点；选最长会在两者被拆开时误选句号停顿（偏早→提前翻页）。
+                        if (e > best) best = e
+                    }
+                    if (best >= 0) {
+                        boundary[k] = best
+                        prev = best
+                    }
+                }
+            }
+
+            // 逐句回退：精修成功的句用静音边界，失败的句只回退该句的字符比例估计（不整批回退，
+            // 否则字符比例误差会在批内逐句累积，到批尾放大到半页，造成翻页提前/延后）。
+            var start = 0L
+            for (k in 0 until n) {
+                cum[range.first + k - fromIdx] = batchStart + start
+                start = when {
+                    k >= n - 1 -> dur
+                    boundary[k] >= 0 -> boundary[k]
+                    else -> est[k + 1]
+                }
             }
             batchStart += dur
         }
@@ -1580,14 +1911,14 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 if (probeResult == TextToSpeech.SUCCESS && probeFile.length() > 44) {
                     probeFile.delete()
                     Timber.d("TTS: probe OK — batch synthesis pipeline")
-                    val mergedFile = withContext(Dispatchers.IO) {
+                    val merged = withContext(Dispatchers.IO) {
                         synthesizeAndMerge(t, cacheDir, startIdx)
                     }
-                    if (mergedFile == null) {
+                    if (merged == null) {
                         _ttsState.value = TtsPlaybackState.Error("语音合成失败")
                         return@launch
                     }
-                    playChapterAudio(mergedFile, startIdx)
+                    playChapterAudio(merged.first, startIdx, merged.second)
                 } else {
                     probeFile.delete()
                     Timber.d("TTS: probe FAILED — fallback to speak()")
@@ -1603,10 +1934,10 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * Synthesize sentences [startIdx..] in batches, merge into one WAV.
-     * Builds [ttsCumChars] for time→sentence mapping.
+     * 返回 (合并文件, 每句累计起始时间)：累计时间用各批真实时长折算，替代整章字符比例的累积漂移。
      * Called on [Dispatchers.IO].
      */
-    private fun synthesizeAndMerge(tts: TextToSpeech, cacheDir: File, startIdx: Int): File? {
+    private fun synthesizeAndMerge(tts: TextToSpeech, cacheDir: File, startIdx: Int): Pair<File, LongArray>? {
         val sentences = ttsSentences.subList(startIdx, ttsSentences.size)
         val total = sentences.size
         if (total == 0) return null
@@ -1658,6 +1989,9 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         cumChars[total] = running
         ttsCumChars = cumChars
 
+        // 用各批真实时长（而非整章字符比例）折算每句累计时间，翻页/高光定位不再随时间累积漂移。
+        val cumTimesMs = buildCumTimesMs(batchFiles, batches, startIdx, total)
+
         // Merge batch WAVs into one file
         val merged = mergeWavFiles(batchFiles, cacheDir)
 
@@ -1666,7 +2000,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
         _ttsSynthesisProgress.value = ""
         Timber.d("TTS merge OK: $batchCount batches → ${merged?.length() ?: 0} bytes")
-        return merged
+        return if (merged == null) null else merged to cumTimesMs
     }
 
     /**
@@ -1961,6 +2295,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
         val segs = ttsStreamSegs
         segs.clear()
+        ttsSingleTimesMs = null
         segs.add(StreamSeg(startIdx, first.cumTimesMs, first.file, firstPlayer))
 
         ttsCurrentIdx = startIdx
@@ -1971,12 +2306,19 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         applyTtsHighlight(startIdx)
 
         coroutineScope {
-            // 后台：按顺序等待后续段，就绪后创建播放器并链到上一段
+            // 后台：按顺序等待后续段，就绪后创建播放器并按「完成监听」接续。
+            // 不用 setNextMediaPlayer：上一段可能只是「尚未开播」（刚被链上、正在等它前面那段播完），
+            // 此时 isPlaying==false 会被误判成「已播完」而提前 start，导致多段叠音。
             var ended = false
             val prep = launch {
-                var prev: MediaPlayer? = firstPlayer
+                var prev: MediaPlayer = firstPlayer
                 for (li in later.indices) {
                     val (offset, deferred) = later[li]
+
+                    // 在 await 之前挂「prev 是否已播完」标记，捕捉合成期间 prev 提前播完的情况。
+                    var finished = false
+                    prev.setOnCompletionListener { finished = true }
+
                     val range = try {
                         deferred.await()
                     } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1986,9 +2328,10 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                         null
                     }
                     if (range == null) {
-                        if (prev?.isPlaying == false) finishTtsChapterOrIdle()
+                        if (finished) finishTtsChapterOrIdle()
                         break
                     }
+
                     val p = MediaPlayer().apply {
                         setDataSource(range.file.absolutePath)
                         setOnErrorListener { _, what, extra ->
@@ -2001,14 +2344,19 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                     applyTtsSpeedTo(p)
                     range.file.deleteOnExit()
                     segs.add(StreamSeg(offset, range.cumTimesMs, range.file, p))
-                    if (prev != null) {
-                        if (prev.isPlaying) prev.setNextMediaPlayer(p) else p.start()
+
+                    if (finished) {
+                        // 上一段已播完（本段合成较慢、链已断）：直接启动本段。
+                        p.start()
+                    } else {
+                        // 上一段还没播完：等它真正播完再自动接续本段，避免叠音。
+                        prev.setOnCompletionListener { p.start() }
                     }
                     prev = p
                     _ttsSynthesisProgress.value = ""
                 }
-                // 已就绪的最后一段挂完成监听（无论中间是否有段失败）
-                segs.lastOrNull()?.player?.setOnCompletionListener { finishTtsChapterOrIdle() }
+                // 最后一段播完即本章结束。
+                prev.setOnCompletionListener { finishTtsChapterOrIdle() }
                 ended = true
             }
 
@@ -2044,17 +2392,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                             val sent = ttsSentences[si].trim()
                             _ttsState.value = TtsPlaybackState.Playing(si, totalSent, sent)
 
-                            if (si > 0) {
-                                val prevPage = ttsSentencePage.getOrElse(si - 1) { 0 }
-                                val curPage = ttsSentencePage.getOrElse(si) { 0 }
-                                if (curPage > prevPage) {
-                                    val global = ttsPrevPageCount + curPage
-                                    if (global != ttsLastFlippedPage && global < _totalPages.value) {
-                                        ttsLastFlippedPage = global
-                                        withContext(Dispatchers.Main) { goToPage(global) }
-                                    }
-                                }
-                            }
+                            keepSentenceInView(si)
                             withContext(Dispatchers.Main) { applyTtsHighlight(si) }
                         }
                     } catch (_: Exception) { break }
@@ -2072,6 +2410,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
      */
     private fun playChapterAudio(file: File, startIdx: Int, cumTimesMs: LongArray? = null) {
         releaseTtsPlayers()
+        ttsSingleTimesMs = cumTimesMs
         ttsChapterFile = file
         file.deleteOnExit()
 
@@ -2145,18 +2484,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                         val sent = ttsSentences[si].trim()
                         _ttsState.value = TtsPlaybackState.Playing(si, totalSent, sent)
 
-                        // Page flip
-                        if (si > 0) {
-                            val prevPage = ttsSentencePage.getOrElse(si - 1) { 0 }
-                            val curPage = ttsSentencePage.getOrElse(si) { 0 }
-                            if (curPage > prevPage) {
-                                val global = ttsPrevPageCount + curPage
-                                if (global != ttsLastFlippedPage && global < _totalPages.value) {
-                                    ttsLastFlippedPage = global
-                                    withContext(Dispatchers.Main) { goToPage(global) }
-                                }
-                            }
-                        }
+                        keepSentenceInView(si)
                         withContext(Dispatchers.Main) { applyTtsHighlight(si) }
                     }
                 } catch (_: Exception) { break }
@@ -2179,14 +2507,20 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        // 单文件：字符比例
+        // 单文件：优先用真实逐句时间（本地整章 WAV 按批折算），否则退回字符比例。
+        val times = ttsSingleTimesMs
+        val player = ttsPlayer ?: return
+        if (times != null && times.size > 1) {
+            val subIdx = (targetIdx - ttsStartIdx).coerceIn(0, times.size - 2)
+            player.seekTo(times[subIdx].toInt())
+            return
+        }
         val cumChars = ttsCumChars
         if (cumChars.size < 2) return
         val totalChars = cumChars.lastOrNull() ?: return
         if (totalChars <= 0) return
         val subIdx = (targetIdx - ttsStartIdx).coerceIn(0, cumChars.size - 2)
         val targetChar = cumChars[subIdx]
-        val player = ttsPlayer ?: return
         val dur = player.duration
         if (dur <= 0) return
         player.seekTo((targetChar.toDouble() / totalChars * dur).toInt())
@@ -2196,17 +2530,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     private fun onSentenceStart(idx: Int, total: Int) {
         ttsCurrentIdx = idx
         _ttsState.value = TtsPlaybackState.Playing(idx, total, ttsSentences[idx].trim())
-        if (idx > 0) {
-            val p0 = ttsSentencePage.getOrElse(idx - 1) { 0 }
-            val p1 = ttsSentencePage.getOrElse(idx) { 0 }
-            if (p1 > p0) {
-                val g = ttsPrevPageCount + p1
-                if (g != ttsLastFlippedPage && g < _totalPages.value) {
-                    ttsLastFlippedPage = g
-                    goToPage(g)
-                }
-            }
-        }
+        keepSentenceInView(idx)
         applyTtsHighlight(idx)
     }
 
@@ -2294,10 +2618,12 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         ttsSentences = emptyList()
         ttsChapterIndex = -1
         ttsSentencePage = intArrayOf()
+        ttsSentenceProgression = DoubleArray(0)
         ttsPrevPageCount = 0
         ttsLastFlippedPage = -1
         ttsCurrentIdx = 0
         ttsCumChars = LongArray(0)
+        ttsSingleTimesMs = null
         clearTtsHighlight()
     }
 
@@ -2332,26 +2658,71 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     // ── TTS Helpers ────────────────────────────────────────────────────
 
+    /** 句→页/进度的字符比例兜底映射（纯本地 O(N)，无 JS）。仅在懒测量失败时回退使用。 */
     private fun buildSentencePageMapping(chapterIdx: Int, sentenceCount: Int) {
         val chPageCount = pageCounts().getOrNull(chapterIdx)?.coerceAtLeast(1) ?: 1
         val totalChars = ttsSentences.sumOf { it.length + 1 }.coerceAtLeast(1)
-        // 关键：句→页映射必须用「满页字符数」= totalChars/(chPageCount-1)，
-        // 而不是平均值 totalChars/chPageCount 或半满假设 (chPageCount-0.5)。
-        // 章节末页几乎总是只剩一两行（下一章另起新页），末页远不到半页、
-        // 常接近空页。若按半满 (-0.5) 计算，满页字符数会偏小 → 每句映射的页码
-        // 偏前、误差随页码累积，导致越到章末翻页越早（约 1/3～1/2 页）。
-        // 按「末页近似空」(-1.0) 计算满页字符数，使页边界对齐真实渲染。
         val fullPageChars = totalChars / (chPageCount - 1.0).coerceAtLeast(1.0)
         ttsSentencePage = IntArray(sentenceCount)
+        ttsSentenceProgression = DoubleArray(sentenceCount)
         var running = 0
         for (i in 0 until sentenceCount) {
-            // 用句「中心」定位页码：跨页边界的那一句，中心落在哪页就归哪页，
-            // 避免用句首把跨页句归到上一页，导致开始/翻页各晚一句。
-            val center = running + (ttsSentences[i].length + 1) / 2.0
-            val page = (center / fullPageChars).toInt().coerceIn(0, chPageCount - 1)
-            ttsSentencePage[i] = page
+            val cp = (running.toDouble() / totalChars).coerceIn(0.0, 1.0)
+            ttsSentenceProgression[i] = cp
+            ttsSentencePage[i] = (running.toDouble() / fullPageChars).toInt().coerceIn(0, chPageCount - 1)
             running += ttsSentences[i].length + 1
         }
+    }
+
+    /** 实测句 [idx] 起始位置的渲染进度（0..1，与 viewport.progressions 同尺度）；失败返回 null。 */
+    private suspend fun measureSentenceProgression(
+        ctrl: ReflowableWebRenditionController,
+        idx: Int,
+    ): Double? {
+        val anchor = makeTextAnchor(idx) ?: return null
+        return try {
+            ctrl.getProgressionForTextAnchor(anchor)
+        } catch (e: Exception) {
+            Timber.w(e, "measureSentenceProgression failed at sentence $idx")
+            null
+        }
+    }
+
+    /**
+     * 二分找「第一个渲染进度 >= [target] 的句子」下标。渲染进度随句序单调递增（翻页模式按列量化、
+     * 滚动模式按高度连续），一次二分仅 log2(N) 次 JS 调用即精确定位到页/视口边界，无插值误差，
+     * 长章节（数百页）也在毫秒级完成。任一次测量失败返回 [fallback]（字符比例估计）。
+     */
+    private suspend fun findFirstSentenceAtOrAfter(
+        ctrl: ReflowableWebRenditionController,
+        target: Double,
+        sentenceCount: Int,
+        fallback: Int,
+    ): Int {
+        var lo = 0
+        var hi = sentenceCount - 1
+        var ans = sentenceCount - 1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            val r = measureSentenceProgression(ctrl, mid) ?: return fallback
+            if (r >= target) {
+                ans = mid
+                hi = mid - 1
+            } else {
+                lo = mid + 1
+            }
+        }
+        return ans
+    }
+
+    /** 构造句 [idx] 起始位置的 TextAnchor（前句尾 60 字 + 本句本身）。 */
+    private fun makeTextAnchor(idx: Int): TextAnchor? {
+        val sentence = ttsSentences.getOrNull(idx)?.trim() ?: return null
+        if (sentence.isEmpty()) return null
+        val prefix = ttsSentences.getOrNull(idx - 1)?.trim()?.takeLast(60) ?: ""
+        // textAfter 只放本句本身：JS 桥把「textAfter 开头若干字」当定位引文，落在句内不跨句边界，
+        // 避免分页模式下「前句句号 + 本句首字」被拆到两个 page 元素导致 textContent 不相邻而定位错位。
+        return TextAnchor(textBefore = prefix, textAfter = sentence)
     }
 
     private fun nextChapter(pub: Publication) {
@@ -2363,15 +2734,82 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         ttsChapterIndex = nextIdx
         ttsSentences = nextSentences
         ttsPrevPageCount += oldPageCount
-        buildSentencePageMapping(nextIdx, nextSentences.size)
         ttsLastFlippedPage = _currentPageIndex.value
         val nextHref = pub.readingOrder[nextIdx].url()
+        // 字符比例兜底映射（纯本地，无 JS）；真正的翻页定位由 keepSentenceInView 懒测渲染进度完成。
+        buildSentencePageMapping(nextIdx, nextSentences.size)
+        // 先导航到新章并等待其 DOM 加载完成再开始合成（新章从第 0 句起，无需二分定位）。
         viewModelScope.launch {
             val s = _uiState.value
             if (s is ReaderUiState.Ready && s.controller != null) s.controller.goTo(nextHref)
+            beginTtsSynthesis(0)
         }
-        // Start synthesis for the new chapter
-        beginTtsSynthesis(0)
+    }
+
+    /** 朗读推进到第 [si] 句时保持语句可见：滚动模式滚到该句；翻页模式跨页翻页。 */
+    private fun keepSentenceInView(si: Int) {
+        val state = _uiState.value
+        if (state !is ReaderUiState.Ready) return
+        val ctrl = state.controller ?: return
+        val href = state.publication.readingOrder.getOrNull(ttsChapterIndex)?.url() ?: return
+
+        if (_scrollMode.value) {
+            // 懒测当前句渲染进度（1 次 JS），滚出「舒适带」才平滑滚动；测量失败退回字符比例。
+            viewModelScope.launch(Dispatchers.Main) {
+                val prog = measureSentenceProgression(ctrl, si)
+                    ?: ttsSentenceProgression.getOrElse(si) { 0.0 }
+                // 视口感知：仅当语句滚出可视区「舒适带」（上 30% ~ 下 70%）时才平滑滚动，把它带回
+                // 上缘 30% 处。避免每句一跳到顶部，也避免高频重导航卡住朗读。
+                val range = ctrl.viewport.progressions[href]
+                val target = if (range != null) {
+                    val start = range.start.value
+                    val end = range.endInclusive.value
+                    val len = (end - start).coerceAtLeast(0.0001)
+                    if (prog < start + len * 0.3 || prog >= start + len * 0.7) {
+                        (prog - len * 0.3).coerceIn(0.0, 1.0)
+                    } else {
+                        null
+                    }
+                } else {
+                    prog
+                }
+                if (target != null) {
+                    ctrl.smoothScrollTo(target)
+                }
+            }
+            return
+        }
+        if (si <= 0) return
+        // 翻页判定：懒测当前句起始的渲染进度，按「页索引」比较——句所在页 > 当前页才翻，并翻到
+        // 「句所在页左缘」（精确页边界）。不用「进度 >= 视口右缘」：用户手动翻页可能停在半页处，
+        // 此时视口右缘不是页边界，会误判提前半页。测量失败退回字符比例句→页映射。
+        val range = ctrl.viewport.progressions[href] ?: return
+        val pageWidth = range.endInclusive.value - range.start.value
+        if (pageWidth <= 0.0001) return
+        val currentPage = Math.floor(range.start.value / pageWidth).toInt().coerceAtLeast(0)
+        viewModelScope.launch(Dispatchers.Main) {
+            val r = measureSentenceProgression(ctrl, si)
+            if (r != null) {
+                val pageOfSi = Math.floor(r / pageWidth).toInt().coerceAtLeast(0)
+                if (pageOfSi > currentPage) {
+                    ttsLastFlippedPage = _currentPageIndex.value
+                    ctrl.goTo(ReflowableWebGoLocation(
+                        href = href,
+                        progression = Progression((pageOfSi * pageWidth).coerceIn(0.0, 1.0))
+                    ))
+                }
+            } else {
+                val prevPage = ttsSentencePage.getOrElse(si - 1) { currentPage }
+                val curPage = ttsSentencePage.getOrElse(si) { currentPage }
+                if (prevPage <= currentPage && curPage > currentPage) {
+                    ttsLastFlippedPage = _currentPageIndex.value
+                    ctrl.goTo(ReflowableWebGoLocation(
+                        href = href,
+                        progression = Progression((curPage * pageWidth).coerceIn(0.0, 1.0))
+                    ))
+                }
+            }
+        }
     }
 
     private fun applyTtsHighlight(sentenceIdx: Int) {
@@ -2382,18 +2820,18 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         if (sentence.isEmpty()) return
         val prefix = ttsSentences.getOrNull(sentenceIdx - 1)?.trim()?.takeLast(60) ?: ""
         val suffix = ttsSentences.getOrNull(sentenceIdx + 1)?.trim()?.take(60) ?: ""
-        val textQuote = org.readium.navigator.common.TextQuote(text = sentence, prefix = prefix, suffix = suffix)
-        val location = org.readium.navigator.web.reflowable.ReflowableWebDecorationLocation(href = href, textQuote = textQuote, cssSelector = null)
-        val decor = Decoration(
+        val textQuote = TextQuote(text = sentence, prefix = prefix, suffix = suffix)
+        val location = ReflowableWebDecorationLocation(href = href, textQuote = textQuote, cssSelector = null)
+        ttsDecor = Decoration(
             id = Decoration.Id("tts-current"), location = location,
             style = Decoration.Style.Highlight(tint = android.graphics.Color.argb(80, 255, 193, 7), isActive = true),
         )
-        s.controller.decorations = persistentMapOf("tts" to persistentListOf(decor))
+        refreshDecorations()
     }
 
     private fun clearTtsHighlight() {
-        val s = _uiState.value
-        if (s is ReaderUiState.Ready && s.controller != null) s.controller.decorations = persistentMapOf()
+        ttsDecor = null
+        refreshDecorations()
     }
 
     /**
@@ -2425,19 +2863,15 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
         if (html.isBlank()) return emptyList()
 
-        // Strip <head>, <style>, <script> blocks first, then HTML tags, then decode entities
+        // Strip <head>, <style>, <script> blocks first, then HTML tags, then decode ALL entities
+        // via Html.fromHtml (manual 7-entity whitelist left &mdash;/&hellip;/&ldquo;/&#8217; etc.
+        // as literal text that TTS read aloud as garbage).
         val plainText = html
             .replace(Regex("""<head[^>]*>[\s\S]*?</head>""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""<style[^>]*>[\s\S]*?</style>""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""<script[^>]*>[\s\S]*?</script>""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""<[^>]+>"""), " ")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&apos;", "'")
-            .replace("&#160;", " ")
-            .replace("&#xa0;", " ")
+            .let { Html.fromHtml(it, Html.FROM_HTML_MODE_LEGACY).toString() }
             .replace(Regex("""\s+"""), " ")
             .trim()
 
@@ -2476,7 +2910,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             for (path in candidates.distinct()) {
                 val entry = zipFile.getEntry(path)
                 if (entry != null) {
-                    return zipFile.getInputStream(entry).bufferedReader(Charsets.UTF_8).readText()
+                    return decodeHtmlEntry(zipFile, entry)
                 }
             }
 
@@ -2485,9 +2919,65 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             val scanned = zipFile.entries().asSequence()
                 .firstOrNull { it.name.endsWith("/$baseName") || it.name == baseName }
                 ?: throw Exception("ZIP entry not found for: $href")
-            return zipFile.getInputStream(scanned).bufferedReader(Charsets.UTF_8).readText()
+            return decodeHtmlEntry(zipFile, scanned)
         } finally {
             zipFile.close()
+        }
+    }
+
+    /** 按文件自身声明的编码（BOM / XML encoding / meta charset）解码 ZIP 条目，默认 UTF-8。 */
+    private fun decodeHtmlEntry(zipFile: java.util.zip.ZipFile, entry: java.util.zip.ZipEntry): String {
+        val bytes = zipFile.getInputStream(entry).use { it.readBytes() }
+        return String(bytes, detectHtmlCharset(bytes))
+    }
+
+    /** 探测 HTML 文件的字符编码：GBK/GB2312 等非 UTF-8 中文 EPUB 若不按其声明解码会读成乱码。 */
+    private fun detectHtmlCharset(bytes: ByteArray): java.nio.charset.Charset {
+        // Byte Order Mark（最高优先级）
+        if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) {
+            return Charsets.UTF_8
+        }
+        if (bytes.size >= 2 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xFF.toByte()) return Charsets.UTF_16BE
+        if (bytes.size >= 2 && bytes[0] == 0xFF.toByte() && bytes[1] == 0xFE.toByte()) return Charsets.UTF_16LE
+
+        // 头部用 ASCII 兼容方式解码（编码声明本身都是 ASCII 字符）
+        val head = String(bytes, 0, minOf(bytes.size, 1024), Charsets.ISO_8859_1)
+
+        fun resolve(name: String): java.nio.charset.Charset? =
+            try { java.nio.charset.Charset.forName(name.trim()) } catch (_: Exception) { null }
+
+        // GB18030 是 GBK/GB2312 的超集，作为「非 UTF-8 中文」的统一回退。
+        fun gbk(): java.nio.charset.Charset =
+            try { java.nio.charset.Charset.forName("GB18030") } catch (_: Exception) { Charsets.UTF_8 }
+
+        // <?xml version="1.0" encoding="GBK"?>
+        val declared = Regex("""encoding\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+            .find(head)?.let { resolve(it.groupValues[1]) }
+            // <meta charset="GBK"> 或 <meta ... content="text/html; charset=GBK">
+            ?: Regex("""<meta[^>]+charset\s*=\s*["']?([^"'>\s/]+)""", RegexOption.IGNORE_CASE)
+                .find(head)?.let { resolve(it.groupValues[1]) }
+
+        if (declared != null) {
+            // 声明为 UTF-8 但字节并非合法 UTF-8：文件实际是 GBK 却被误标，按真实字节回退 GB18030。
+            val name = declared.name().lowercase()
+            if ((name == "utf-8" || name == "utf8") && !isValidUtf8(bytes)) return gbk()
+            return declared
+        }
+
+        // 无任何声明：优先 UTF-8；字节非法（旧式中文 EPUB 常见）则回退 GB18030。
+        return if (isValidUtf8(bytes)) Charsets.UTF_8 else gbk()
+    }
+
+    /** 严格校验 [bytes] 是否为合法 UTF-8 字节序列（非法/不完整序列会抛 CharacterCodingException）。 */
+    private fun isValidUtf8(bytes: ByteArray): Boolean {
+        val decoder = Charsets.UTF_8.newDecoder()
+            .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+            .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        return try {
+            decoder.decode(java.nio.ByteBuffer.wrap(bytes))
+            true
+        } catch (_: java.nio.charset.CharacterCodingException) {
+            false
         }
     }
 
@@ -2519,12 +3009,35 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     /** Split text into sentences, keeping punctuation attached. */
     private fun splitSentences(text: String): List<String> {
         if (text.isBlank()) return emptyList()
-        // Split after sentence-ending punctuation: 。！？.!? followed by optional whitespace
+        // 在句末标点后切分（固定长度 lookbehind，兼容各 Android 版本的正则引擎）。
+        val closingPunct = setOf('"', '\'', '”', '’', '」', '』', '）', ')', '】', '》', '〉')
         val raw = text.split(Regex("""(?<=[。！？.!?])\s*"""))
             .map { it.trim() }
             .filter { it.isNotBlank() }
         if (raw.isEmpty()) return listOf(text)
-        return raw
+
+        val merged = mutableListOf<String>()
+        for (seg in raw) {
+            if (merged.isEmpty()) {
+                merged.add(seg)
+                continue
+            }
+            // 本段开头紧跟的右引号/右括号等「收尾符号」挪到上一句末尾：如 “你好。” 后面的 ” 应属于
+            // 上一句，否则会被误归为下一句的开头。
+            val lead = seg.takeWhile { it in closingPunct }
+            val rest = seg.substring(lead.length)
+            if (lead.isNotEmpty()) {
+                merged[merged.lastIndex] = merged.last() + lead
+            }
+            // 剩余部分若没有任何字母/数字（纯标点，如连续的 。 或空格后残留的右引号），并入上一句，
+            // 避免被语音引擎单独读成一句。
+            if (rest.none { it.isLetterOrDigit() }) {
+                merged[merged.lastIndex] = merged.last() + rest
+            } else {
+                merged.add(rest)
+            }
+        }
+        return merged
     }
 
     override fun onCleared() {
@@ -2541,13 +3054,20 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     companion object {
-        /** Sentences per TTS synthesis batch — sweet spot for neural TTS quality. */
+        /** 云端/本地合成批句数。批越大请求越少、缓冲越厚（避免卡顿）；批内逐句时间由静音检测得到，不再受批大小影响。 */
         const val TTS_BATCH_SIZE = 6
         /** 云端 TTS 并发合成批次数（降低开始朗读前的等待）。 */
         const val CLOUD_TTS_CONCURRENCY = 3
         /** 云端流式头段句数：先合成并播放这 N 句，其余后台合成后无缝衔接。 */
         const val CLOUD_TTS_HEAD_SENTENCES = 6
-        private val reflowableConfig = ReflowableWebConfiguration()
+        private val reflowableConfig = ReflowableWebConfiguration(
+            decorationTemplates = WebDecorationTemplates(
+                defaultTemplates = WebDecorationTemplates.defaultTemplates(alpha = 0.5)
+            ) {
+                set(WavyUnderlineStyle::class, wavyUnderlineTemplate())
+                set(Decoration.Style.Underline::class, underlineTemplate())
+            }
+        )
         private val fixedConfig = FixedWebConfiguration()
         private val darkBeigeTheme = ReflowableWebPreferences(
             textColor = org.readium.r2.navigator.preferences.Color(android.graphics.Color.parseColor("#FFEFD5")),

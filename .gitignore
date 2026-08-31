@@ -9,3 +9,9 @@ captures/
 local.properties
 .kotlin/
 *.log
+
+# Signing (do not commit — release keystore + password)
+keystore.properties
+keystore/
+*.jks
+*.keystore

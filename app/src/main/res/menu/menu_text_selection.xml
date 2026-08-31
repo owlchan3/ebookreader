@@ -13,4 +13,14 @@
         android:id="@+id/action_share"
         android:title="分享"
         app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_highlight"
+        android:title="划线"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_annotate"
+        android:title="批注"
+        app:showAsAction="ifRoom" />
 </menu>

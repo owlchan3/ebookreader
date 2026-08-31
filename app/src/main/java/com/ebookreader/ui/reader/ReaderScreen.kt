@@ -14,8 +14,11 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -27,6 +30,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -34,6 +39,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -66,6 +72,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
@@ -91,6 +98,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -102,6 +110,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ebookreader.domain.model.AnnotationStyle
 import com.ebookreader.ui.common.VerticalScrollbar
 import com.ebookreader.ui.common.computeScrollFraction
 import com.ebookreader.ui.common.fractionToScrollPosition
@@ -137,6 +146,9 @@ fun ReaderScreen(
     val book by viewModel.book.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
     val bookmarks by viewModel.bookmarks.collectAsState()
+    val annotations by viewModel.annotations.collectAsState()
+    val pendingHighlight by viewModel.pendingHighlight.collectAsState()
+    val pendingAnnotation by viewModel.pendingAnnotation.collectAsState()
     val pageLabel by viewModel.currentPageLabel.collectAsState()
     val currentPageIndex by viewModel.currentPageIndex.collectAsState()
     val totalPages by viewModel.totalPages.collectAsState()
@@ -175,6 +187,7 @@ fun ReaderScreen(
 
     var isUiVisible by remember { mutableStateOf(false) }
     var showBookmarksSheet by remember { mutableStateOf(false) }
+    var showAnnotationsSheet by remember { mutableStateOf(false) }
     var showSearchSheet by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
     var sliderPosition by remember { mutableFloatStateOf(0f) }
@@ -217,9 +230,9 @@ fun ReaderScreen(
         }
     }
 
-    LaunchedEffect(isUiVisible, isDraggingProgress, drawerState.isOpen, showBookmarksSheet, showSearchSheet, showSettingsSheet) {
+    LaunchedEffect(isUiVisible, isDraggingProgress, drawerState.isOpen, showBookmarksSheet, showAnnotationsSheet, showSearchSheet, showSettingsSheet) {
         // 拖动进度条、目录展开或任一面板打开时不要自动收起 UI，等它们都关闭后再计时收起
-        val panelOpen = showBookmarksSheet || showSearchSheet || showSettingsSheet
+        val panelOpen = showBookmarksSheet || showAnnotationsSheet || showSearchSheet || showSettingsSheet
         if (isUiVisible && !isDraggingProgress && !drawerState.isOpen && !panelOpen) {
             delay(3000)
             isUiVisible = false
@@ -337,7 +350,13 @@ fun ReaderScreen(
                     val scope = rememberCoroutineScope()
                     val controller = state.controller
                     val selectionActionMode = remember(controller) {
-                        controller?.let { TextSelectionActionModeCallback(context, it, scope) }
+                        controller?.let {
+                            TextSelectionActionModeCallback(
+                                context, it, scope,
+                                onHighlight = viewModel::onHighlightRequested,
+                                onAnnotate = viewModel::onAnnotateRequested,
+                            )
+                        }
                     }
                     ReflowableWebRendition(
                         modifier = Modifier.fillMaxSize(),
@@ -584,7 +603,10 @@ fun ReaderScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         IconButton(onClick = { showBookmarksSheet = true }) {
-                            Icon(Icons.Default.Bookmark, "书签/批注", Modifier.size(22.dp))
+                            Icon(Icons.Default.Bookmark, "书签", Modifier.size(22.dp))
+                        }
+                        IconButton(onClick = { showAnnotationsSheet = true }) {
+                            Icon(Icons.Default.Create, "批注", Modifier.size(22.dp))
                         }
                         IconButton(onClick = { viewModel.moveToPrevChapter() }) {
                             Icon(Icons.Default.ChevronLeft, "上一章", Modifier.size(28.dp))
@@ -628,7 +650,7 @@ fun ReaderScreen(
         }) {
             Column(Modifier.padding(16.dp)) {
                 Row(Modifier.fillMaxWidth()) {
-                    Text("书签 / 页批注", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Text("书签", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = {
                         viewModel.addBookmark(pageLabel.ifEmpty { "书签 ${bookmarks.size + 1}" })
@@ -698,6 +720,275 @@ fun ReaderScreen(
                                             editingBookmarkId = bm.id
                                             editingNote = bm.note
                                         }) { Text(if (bm.note.isEmpty()) "添加批注" else "编辑批注", fontSize = 12.sp) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Highlight style/color selector
+    val ph = pendingHighlight
+    if (ph != null) {
+        var style by remember(ph) { mutableStateOf(AnnotationStyle.HIGHLIGHT) }
+        var color by remember(ph) { mutableStateOf(highlightColors.first()) }
+        val highlightSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(onDismissRequest = { viewModel.dismissPendingHighlight() }, sheetState = highlightSheetState) {
+            Column(Modifier.padding(16.dp)) {
+                Text("划线", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("「${ph.text.take(30)}」",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(12.dp))
+                Text("样式", style = MaterialTheme.typography.labelLarge)
+                HighlightStyleSelector(style) { style = it }
+                Spacer(Modifier.height(8.dp))
+                Text("颜色", style = MaterialTheme.typography.labelLarge)
+                ColorSelector(color) { color = it }
+                Spacer(Modifier.height(16.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { viewModel.dismissPendingHighlight() }) { Text("取消") }
+                    Button(onClick = { viewModel.applyHighlight(style, color) }) { Text("划线") }
+                }
+            }
+        }
+    }
+
+    // Annotation note dialog
+    val pa = pendingAnnotation
+    if (pa != null) {
+        var note by remember(pa) { mutableStateOf("") }
+        var style by remember(pa) { mutableStateOf(AnnotationStyle.HIGHLIGHT) }
+        var color by remember(pa) { mutableStateOf(highlightColors.first()) }
+        val annotationSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(onDismissRequest = { viewModel.dismissPendingAnnotation() }, sheetState = annotationSheetState) {
+            Column(Modifier.imePadding().verticalScroll(rememberScrollState()).padding(16.dp)) {
+                Text("批注", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("「${pa.text.take(30)}」",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it },
+                    label = { Text("笔记") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("样式", style = MaterialTheme.typography.labelLarge)
+                HighlightStyleSelector(style) { style = it }
+                Spacer(Modifier.height(8.dp))
+                Text("颜色", style = MaterialTheme.typography.labelLarge)
+                ColorSelector(color) { color = it }
+                Spacer(Modifier.height(16.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { viewModel.dismissPendingAnnotation() }) { Text("取消") }
+                    Button(onClick = { viewModel.saveAnnotation(note, style, color) }) { Text("保存") }
+                }
+            }
+        }
+    }
+
+    // Annotations list sheet（批注 = 有笔记，划线 = 无笔记）
+    if (showAnnotationsSheet) {
+        var editingAnnotationId by remember { mutableStateOf<Long?>(null) }
+        var editingNote by remember { mutableStateOf("") }
+        var editingStyle by remember { mutableStateOf(AnnotationStyle.HIGHLIGHT) }
+        var editingColor by remember { mutableStateOf(highlightColors.first()) }
+        var annotationTab by remember { mutableStateOf(0) }
+
+        val noteAnnotations = annotations.filter { it.note.isNotEmpty() }
+        val highlightAnnotations = annotations.filter { it.note.isEmpty() }
+
+        ModalBottomSheet(onDismissRequest = {
+            showAnnotationsSheet = false
+            editingAnnotationId = null
+        }) {
+            Column(Modifier.padding(16.dp)) {
+                Text("批注与划线", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(4.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { annotationTab = 0 }) {
+                        Text(
+                            "批注 (${noteAnnotations.size})",
+                            color = if (annotationTab == 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            fontWeight = if (annotationTab == 0) FontWeight.Bold else FontWeight.Normal,
+                        )
+                    }
+                    TextButton(onClick = { annotationTab = 1 }) {
+                        Text(
+                            "划线 (${highlightAnnotations.size})",
+                            color = if (annotationTab == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            fontWeight = if (annotationTab == 1) FontWeight.Bold else FontWeight.Normal,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+
+                if (annotationTab == 0) {
+                    if (noteAnnotations.isEmpty()) {
+                        Text("暂无批注。滚动模式下选中文字后点「批注」即可添加。",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    } else {
+                        LazyColumn(Modifier.height(400.dp)) {
+                            itemsIndexed(noteAnnotations) { _, ann ->
+                                Card(
+                                    Modifier.fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .clickable {
+                                            viewModel.goToPage(ann.pageIndex)
+                                            showAnnotationsSheet = false
+                                        },
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                ) {
+                                    Column(Modifier.padding(12.dp)) {
+                                        Row(
+                                            Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(Icons.Default.Create, null, Modifier.size(18.dp),
+                                                tint = MaterialTheme.colorScheme.primary)
+                                            Spacer(Modifier.width(10.dp))
+                                            Text(viewModel.annotationPageLabel(ann), Modifier.weight(1f),
+                                                style = MaterialTheme.typography.bodyMedium)
+                                            Text(formatTimestamp(ann.createdTimestamp), fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                                            IconButton(onClick = { viewModel.removeAnnotation(ann.id) }) {
+                                                Icon(Icons.Default.Delete, "删除", Modifier.size(18.dp),
+                                                    tint = MaterialTheme.colorScheme.error)
+                                            }
+                                        }
+                                        Spacer(Modifier.height(6.dp))
+                                        // 原文：斜体 + 左侧竖条，与下方笔记明显区分
+                                        Row(
+                                            Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+                                            verticalAlignment = Alignment.Top
+                                        ) {
+                                            Box(Modifier
+                                                .width(3.dp)
+                                                .fillMaxHeight()
+                                                .background(MaterialTheme.colorScheme.primary))
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(ann.selectedText,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                fontStyle = FontStyle.Italic,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        }
+
+                                        if (editingAnnotationId == ann.id) {
+                                            Spacer(Modifier.height(6.dp))
+                                            OutlinedTextField(
+                                                value = editingNote,
+                                                onValueChange = { editingNote = it },
+                                                label = { Text("笔记") },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                minLines = 2,
+                                            )
+                                            Spacer(Modifier.height(8.dp))
+                                            HighlightStyleSelector(editingStyle) { editingStyle = it }
+                                            ColorSelector(editingColor) { editingColor = it }
+                                            Spacer(Modifier.height(4.dp))
+                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                                TextButton(onClick = {
+                                                    viewModel.editAnnotation(ann.id, editingNote, editingStyle, editingColor)
+                                                    editingAnnotationId = null
+                                                }) { Text("保存") }
+                                                TextButton(onClick = { editingAnnotationId = null }) { Text("取消") }
+                                            }
+                                        } else {
+                                            Spacer(Modifier.height(8.dp))
+                                            // 笔记：带底色圆角框 + 「笔记」小标题，明显区别于原文
+                                            Box(Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+                                                .padding(10.dp)
+                                            ) {
+                                                Column {
+                                                    Text("笔记", fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                                                        color = MaterialTheme.colorScheme.primary)
+                                                    Spacer(Modifier.height(2.dp))
+                                                    Text(ann.note, style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.onSurface)
+                                                }
+                                            }
+                                            Spacer(Modifier.height(2.dp))
+                                            TextButton(onClick = {
+                                                editingAnnotationId = ann.id
+                                                editingNote = ann.note
+                                                editingStyle = ann.style
+                                                editingColor = ann.color
+                                            }) { Text("编辑笔记", fontSize = 12.sp) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if (highlightAnnotations.isEmpty()) {
+                        Text("暂无划线。滚动模式下选中文字后点「划线」即可添加。",
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                    } else {
+                        LazyColumn(Modifier.height(400.dp)) {
+                            itemsIndexed(highlightAnnotations) { _, ann ->
+                                Card(
+                                    Modifier.fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .clickable {
+                                            viewModel.goToPage(ann.pageIndex)
+                                            showAnnotationsSheet = false
+                                        },
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                ) {
+                                    Column(Modifier.padding(12.dp)) {
+                                        Row(
+                                            Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                highlightStyleLabels.firstOrNull { it.first == ann.style }?.second ?: "高光",
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(viewModel.annotationPageLabel(ann), Modifier.weight(1f),
+                                                style = MaterialTheme.typography.bodyMedium)
+                                            Text(formatTimestamp(ann.createdTimestamp), fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                                            IconButton(onClick = { viewModel.removeAnnotation(ann.id) }) {
+                                                Icon(Icons.Default.Delete, "删除", Modifier.size(18.dp),
+                                                    tint = MaterialTheme.colorScheme.error)
+                                            }
+                                        }
+                                        Spacer(Modifier.height(6.dp))
+                                        Row(
+                                            Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+                                            verticalAlignment = Alignment.Top
+                                        ) {
+                                            Box(Modifier
+                                                .width(3.dp)
+                                                .fillMaxHeight()
+                                                .background(Color(ann.color.toLong() and 0xFFFFFFFFL)))
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(ann.selectedText,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                        }
                                     }
                                 }
                             }
@@ -882,6 +1173,64 @@ private fun formatTimestamp(ts: Long): String {
         val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
         sdf.format(java.util.Date(ts))
     } catch (_: Exception) { "" }
+}
+
+private val highlightColors: List<Int> = listOf(
+    0xFFFFEB3B.toInt(), // 黄
+    0xFF4CAF50.toInt(), // 绿
+    0xFF2196F3.toInt(), // 蓝
+    0xFFE91E63.toInt(), // 粉
+    0xFFFF9800.toInt(), // 橙
+    0xFF9C27B0.toInt(), // 紫
+)
+
+private val highlightStyleLabels: List<Pair<AnnotationStyle, String>> = listOf(
+    AnnotationStyle.HIGHLIGHT to "高光",
+    AnnotationStyle.UNDERLINE to "横线",
+    AnnotationStyle.WAVY to "波浪线",
+)
+
+@Composable
+private fun HighlightStyleSelector(
+    selected: AnnotationStyle,
+    onSelect: (AnnotationStyle) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        highlightStyleLabels.forEach { (style, label) ->
+            val isSelected = style == selected
+            TextButton(onClick = { onSelect(style) }) {
+                Text(
+                    label,
+                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ColorSelector(
+    selected: Int,
+    onSelect: (Int) -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        highlightColors.forEach { color ->
+            val isSelected = color == selected
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(Color(color.toLong() and 0xFFFFFFFFL))
+                    .border(
+                        width = if (isSelected) 3.dp else 1.dp,
+                        color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                        shape = CircleShape,
+                    )
+                    .clickable { onSelect(color) }
+            )
+        }
+    }
 }
 
 @Composable

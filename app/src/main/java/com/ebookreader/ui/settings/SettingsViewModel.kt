@@ -3,6 +3,7 @@ package com.ebookreader.ui.settings
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ebookreader.data.backup.BackupManager
 import com.ebookreader.data.network.ApiKeyManager
 import com.ebookreader.data.network.ChapterPattern
 import com.ebookreader.data.network.DeepSeekClient
@@ -13,6 +14,7 @@ import com.ebookreader.di.Injector
 import com.ebookreader.domain.model.Tag
 import com.ebookreader.domain.repository.TagRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -598,6 +600,38 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             if (f.exists()) total += f.length()
         }
         return total
+    }
+
+    // ── 备份 / 恢复 ──────────────────────────────────────────────
+
+    private val _isBackingUp = MutableStateFlow(false)
+    val isBackingUp: StateFlow<Boolean> = _isBackingUp.asStateFlow()
+
+    private val _backupMessage = MutableStateFlow<String?>(null)
+    val backupMessage: StateFlow<String?> = _backupMessage.asStateFlow()
+
+    fun clearBackupMessage() { _backupMessage.value = null }
+
+    fun exportBackup(uri: android.net.Uri) {
+        viewModelScope.launch {
+            _isBackingUp.value = true
+            _backupMessage.value = BackupManager.exportBackup(getApplication<Application>(), uri).message
+            _isBackingUp.value = false
+        }
+    }
+
+    fun importBackup(uri: android.net.Uri) {
+        viewModelScope.launch {
+            _isBackingUp.value = true
+            val result = BackupManager.importBackup(getApplication<Application>(), uri)
+            _backupMessage.value = result.message
+            _isBackingUp.value = false
+            if (result.success) {
+                // 恢复的文件在内存单例/ViewModel 里仍是旧引用，延迟片刻后重启进程，让数据立即生效。
+                delay(1800)
+                BackupManager.restartApp(getApplication())
+            }
+        }
     }
 
 }

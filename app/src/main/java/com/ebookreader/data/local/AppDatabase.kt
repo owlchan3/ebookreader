@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.ebookreader.data.local.dao.AnnotationDao
 import com.ebookreader.data.local.dao.BookDao
 import com.ebookreader.data.local.dao.BookmarkDao
 import com.ebookreader.data.local.dao.ChatDao
@@ -14,6 +15,7 @@ import com.ebookreader.data.local.dao.BookChunkDao
 import com.ebookreader.data.local.dao.BookDecompositionDao
 import com.ebookreader.data.local.dao.DailyBookReadingDao
 import com.ebookreader.data.local.dao.DailyReadingSessionDao
+import com.ebookreader.data.local.entity.AnnotationEntity
 import com.ebookreader.data.local.entity.BookChunkEntity
 import com.ebookreader.data.local.entity.BookDecompositionEntity
 import com.ebookreader.data.local.entity.BookEntity
@@ -36,6 +38,7 @@ import com.ebookreader.data.local.entity.TagGroupEntity
         BookRelationCrossRef::class,
         TagGroupEntity::class,
         BookmarkEntity::class,
+        AnnotationEntity::class,
         ChapterEntity::class,
         ConversationEntity::class,
         ChatMessageEntity::class,
@@ -44,13 +47,14 @@ import com.ebookreader.data.local.entity.TagGroupEntity
         DailyBookReadingEntity::class,
         BookDecompositionEntity::class,
     ],
-    version = 18,
+    version = 19,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun bookDao(): BookDao
     abstract fun tagDao(): TagDao
     abstract fun bookmarkDao(): BookmarkDao
+    abstract fun annotationDao(): AnnotationDao
     abstract fun chatDao(): ChatDao
     abstract fun bookChunkDao(): BookChunkDao
     abstract fun bookDecompositionDao(): BookDecompositionDao
@@ -60,6 +64,11 @@ abstract class AppDatabase : RoomDatabase() {
     /** 压缩数据库文件，回收删除数据后未释放的空间。需在后台线程调用。 */
     fun vacuum() {
         openHelper.writableDatabase.execSQL("VACUUM")
+    }
+
+    /** 执行 WAL 检查点，把已提交事务合并回主库文件，确保 .db 自包含（导出备份前调用）。 */
+    fun checkpoint() {
+        openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").close()
     }
 
     companion object {
@@ -215,6 +224,31 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 上一次构建曾用带 DEFAULT 的 schema 建表，触发 Room 校验崩溃并可能残留半成品表；
+                // 此处先删后建，确保按 Room 期望的精确 schema 重建（全新功能表，无历史数据可丢失）。
+                db.execSQL("DROP TABLE IF EXISTS annotations")
+                db.execSQL(
+                    """
+                    CREATE TABLE annotations (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        bookId INTEGER NOT NULL,
+                        locatorJson TEXT NOT NULL,
+                        selectedText TEXT NOT NULL,
+                        pageIndex INTEGER NOT NULL,
+                        style TEXT NOT NULL,
+                        color INTEGER NOT NULL,
+                        note TEXT NOT NULL,
+                        createdTimestamp INTEGER NOT NULL,
+                        FOREIGN KEY (bookId) REFERENCES books(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_annotations_bookId ON annotations(bookId)")
+            }
+        }
+
         // 降级迁移：早期版本短暂引入过「术语库」表（v19），现已回退到 v18。
         // 已升级到 v19 的旧库在降级时删除该表，避免 Room 因缺少 19→18 迁移而崩溃。
         val MIGRATION_19_18 = object : Migration(19, 18) {
@@ -230,9 +264,20 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "ebook_reader.db",
                 )
-                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_19_18)
+                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_18)
                     .fallbackToDestructiveMigrationFrom(1, 2, 3, 4)
                     .build().also { INSTANCE = it }
+            }
+        }
+
+        /** 关闭并置空单例。用于「导入备份」在覆盖数据库文件前释放句柄；下次 getInstance 重新打开。 */
+        fun closeInstance() {
+            synchronized(this) {
+                try {
+                    INSTANCE?.close()
+                } catch (_: Exception) {
+                }
+                INSTANCE = null
             }
         }
     }
