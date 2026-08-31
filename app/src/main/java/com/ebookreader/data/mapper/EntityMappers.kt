@@ -36,6 +36,7 @@ fun BookEntity.toDomain(): Book = Book(
     lastReadTimestamp = lastReadTimestamp,
     fileSize = fileSize,
     originalFilePath = originalFilePath,
+    totalCharacters = totalCharacters,
 )
 
 fun Book.toEntity(): BookEntity = BookEntity(
@@ -54,6 +55,7 @@ fun Book.toEntity(): BookEntity = BookEntity(
     lastReadTimestamp = lastReadTimestamp,
     fileSize = fileSize,
     originalFilePath = originalFilePath,
+    totalCharacters = totalCharacters,
 )
 
 fun TagEntity.toDomain(): Tag = Tag(

@@ -17,6 +17,7 @@ interface ChatRepository {
 
     suspend fun getBookContent(bookId: Long): String
     suspend fun getBookTextSample(bookId: Long, maxChars: Int): String
+    suspend fun countCharacters(filePath: String, format: String): Long
     suspend fun exportConversation(conversationId: Long): String
 
     /** Index a book into chunks. Returns true if new indexing was performed. */

@@ -59,6 +59,9 @@ class BookRepositoryImpl(private val bookDao: BookDao) : BookRepository {
     override suspend fun addReadingTime(bookId: Long, seconds: Long) =
         bookDao.addReadingTime(bookId, seconds)
 
+    override suspend fun updateTotalCharacters(bookId: Long, totalCharacters: Long) =
+        bookDao.updateTotalCharacters(bookId, totalCharacters)
+
     override suspend fun countBooksByBaseName(baseName: String): Int =
         bookDao.countBooksByBaseName(baseName)
 

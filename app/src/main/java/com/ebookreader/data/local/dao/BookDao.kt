@@ -66,6 +66,9 @@ interface BookDao {
     @Query("UPDATE books SET totalReadingTime = totalReadingTime + :seconds WHERE id = :bookId")
     suspend fun addReadingTime(bookId: Long, seconds: Long)
 
+    @Query("UPDATE books SET totalCharacters = :totalCharacters WHERE id = :bookId")
+    suspend fun updateTotalCharacters(bookId: Long, totalCharacters: Long)
+
     @Query("SELECT * FROM book_tag_cross_ref")
     fun observeAllBookTagRelations(): Flow<List<com.ebookreader.data.local.entity.BookTagCrossRef>>
 

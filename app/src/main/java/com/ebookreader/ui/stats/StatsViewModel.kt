@@ -1,6 +1,7 @@
 package com.ebookreader.ui.stats
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ebookreader.data.local.entity.DailyReadingSessionEntity
@@ -9,6 +10,7 @@ import com.ebookreader.domain.model.Book
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class StatsViewModel(application: Application) : AndroidViewModel(application) {
@@ -53,6 +55,9 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             loadReadBookIds()
         }
+        viewModelScope.launch {
+            backfillMissingCharacterCounts()
+        }
     }
 
     private suspend fun loadReadBookIds() {
@@ -75,6 +80,28 @@ class StatsViewModel(application: Application) : AndroidViewModel(application) {
         _dailySessions.value = sessionDao.getSessionsSince(fromDate)
         // 总阅读时长改用 daily_reading_sessions 全表求和（删书不丢时长），与「周」同源
         _totalReadingSeconds.value = sessionDao.getTotalReadingSeconds()
+    }
+
+    /** 迁移后旧书的 totalCharacters 为 0，首次打开统计页时逐本补算并写回（一次性守卫；PDF 按每页 600 字估算）。 */
+    private suspend fun backfillMissingCharacterCounts() {
+        val prefs = getApplication<Application>().getSharedPreferences("stats_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("char_backfill_done", false)) return
+        val chatRepository = Injector.chatRepository()
+        val missing = bookRepository.getAllBooks().first()
+            .filter { it.totalCharacters <= 0L }
+        for (book in missing) {
+            try {
+                val count = if (book.format.equals("PDF", ignoreCase = true)) {
+                    book.totalPages.toLong() * 600L
+                } else {
+                    chatRepository.countCharacters(book.filePath, book.format)
+                }
+                if (count > 0L) bookRepository.updateTotalCharacters(book.id, count)
+            } catch (_: Exception) {
+                // 抽取失败（文件丢失/格式不支持）则保持 0，跳过
+            }
+        }
+        prefs.edit().putBoolean("char_backfill_done", true).apply()
     }
 
     /** 选中某一天，加载当天阅读最久的三本书。 */

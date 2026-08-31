@@ -20,4 +20,5 @@ data class BookEntity(
     val lastReadTimestamp: Long = 0,
     val fileSize: Long = 0,
     val originalFilePath: String? = null,
+    val totalCharacters: Long = 0,
 )

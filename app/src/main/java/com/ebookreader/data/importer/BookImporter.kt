@@ -15,6 +15,7 @@ import org.readium.r2.shared.util.http.DefaultHttpClient
 import org.readium.r2.shared.util.toUrl
 import org.readium.r2.streamer.PublicationOpener
 import org.readium.r2.streamer.parser.DefaultPublicationParser
+import com.ebookreader.di.Injector
 import timber.log.Timber
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -121,6 +122,16 @@ class BookImporter(private val context: Context) {
                 } else null
             } catch (_: Exception) { null }
 
+            // 字数：PDF 按「每页 600 字」估算（跳过 PDFium 全文抽取，避免内存过大）；
+            // 其余格式复用全文抽取管线统计非空白字符数。
+            val totalCharacters = if (format == "PDF") {
+                totalPages.toLong() * 600L
+            } else {
+                runCatching {
+                    Injector.chatRepository().countCharacters(bookFile.absolutePath, format)
+                }.getOrDefault(0L)
+            }
+
             val book = com.ebookreader.domain.model.Book(
                 title = title, author = author.ifEmpty { "未知作者" },
                 description = description, coverPath = coverPath,
@@ -128,6 +139,7 @@ class BookImporter(private val context: Context) {
                 totalPages = totalPages, currentPage = 0, currentLocator = null,
                 totalReadingTime = 0, addedTimestamp = System.currentTimeMillis(),
                 lastReadTimestamp = 0, fileSize = fileSize,
+                totalCharacters = totalCharacters,
             )
 
             publication.close(); asset.close()

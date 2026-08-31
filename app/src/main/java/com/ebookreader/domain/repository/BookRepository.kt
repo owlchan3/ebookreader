@@ -26,6 +26,7 @@ interface BookRepository {
     suspend fun updateReadingProgress(bookId: Long, page: Int, totalPages: Int, locator: String?, timestamp: Long)
     suspend fun updateFilePath(bookId: Long, filePath: String)
     suspend fun addReadingTime(bookId: Long, seconds: Long)
+    suspend fun updateTotalCharacters(bookId: Long, totalCharacters: Long)
     suspend fun countBooksByBaseName(baseName: String): Int
     fun getRelatedBooks(bookId: Long): Flow<List<Book>>
     suspend fun addManualRelation(bookId: Long, relatedBookId: Long)

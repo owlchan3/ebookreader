@@ -277,12 +277,17 @@ private fun formatDuration(seconds: Long): String {
 @Composable
 private fun StatsOverview(books: List<Book>, totalReadingSeconds: Long, readBookIds: Set<Long>) {
     val totalBooks = books.size
-    val totalPages = books.sumOf { it.totalPages.toLong() }
-    // 「已阅」书籍全本视为已读
-    val pagesRead = books.sumOf { book ->
-        if (book.id in readBookIds) book.totalPages.toLong() else book.currentPage.toLong()
+    val totalChars = books.sumOf { it.totalCharacters }
+    // 「已阅」书籍全本视为已读；否则按阅读进度比例估算已读字数。
+    val charsRead = books.sumOf { book ->
+        when {
+            book.id in readBookIds -> book.totalCharacters
+            book.totalCharacters <= 0L -> 0L
+            book.totalPages > 0 -> book.totalCharacters * book.currentPage / book.totalPages
+            else -> 0L
+        }
     }
-    val progressPercent = if (totalPages > 0) (pagesRead * 100 / totalPages).toInt() else 0
+    val progressPercent = if (totalChars > 0) (charsRead * 100 / totalChars).toInt() else 0
     val readingHours = totalReadingSeconds / 3600
     val readingMinutes = (totalReadingSeconds % 3600) / 60
 
@@ -290,11 +295,11 @@ private fun StatsOverview(books: List<Book>, totalReadingSeconds: Long, readBook
     Spacer(Modifier.height(12.dp))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         StatCard("藏书", "$totalBooks 本", Modifier.weight(1f))
-        StatCard("总页数", formatNumber(totalPages), Modifier.weight(1f))
+        StatCard("总字数", formatNumber(totalChars), Modifier.weight(1f))
     }
     Spacer(Modifier.height(12.dp))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        StatCard("已读页数", formatNumber(pagesRead), Modifier.weight(1f))
+        StatCard("已读字数", formatNumber(charsRead), Modifier.weight(1f))
         StatCard("阅读进度", "$progressPercent%", Modifier.weight(1f))
     }
     Spacer(Modifier.height(12.dp))
@@ -459,7 +464,8 @@ private fun StatCard(label: String, value: String, modifier: Modifier = Modifier
 
 private fun formatNumber(n: Long): String {
     return when {
-        n >= 100_000_000 -> "${n / 100_000_000}.${(n % 100_000_000) / 10_000_000}亿"
+        // ≥8000 万改用「亿」作单位，精确到三位小数
+        n >= 80_000_000 -> String.format(Locale.US, "%.3f亿", n / 100_000_000.0)
         n >= 10_000 -> "${n / 10_000}.${(n % 10_000) / 1_000}万"
         else -> "$n"
     }

@@ -107,6 +107,10 @@ class ChatRepositoryImpl(
         full.take(maxChars)
     }
 
+    override suspend fun countCharacters(filePath: String, format: String): Long = withContext(Dispatchers.IO) {
+        extractContent(filePath, format).count { !it.isWhitespace() }.toLong()
+    }
+
     // ── Export ─────────────────────────────────────────────────────────────
 
     override suspend fun exportConversation(conversationId: Long): String {

@@ -47,7 +47,7 @@ import com.ebookreader.data.local.entity.TagGroupEntity
         DailyBookReadingEntity::class,
         BookDecompositionEntity::class,
     ],
-    version = 19,
+    version = 20,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -249,6 +249,12 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE books ADD COLUMN totalCharacters INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         // 降级迁移：早期版本短暂引入过「术语库」表（v19），现已回退到 v18。
         // 已升级到 v19 的旧库在降级时删除该表，避免 Room 因缺少 19→18 迁移而崩溃。
         val MIGRATION_19_18 = object : Migration(19, 18) {
@@ -264,7 +270,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "ebook_reader.db",
                 )
-                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_18)
+                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_19_18)
                     .fallbackToDestructiveMigrationFrom(1, 2, 3, 4)
                     .build().also { INSTANCE = it }
             }
