@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.DpSize
 import kotlinx.collections.immutable.toImmutableMap
 import kotlinx.coroutines.flow.launchIn
@@ -74,6 +75,7 @@ public fun ReflowableWebRendition(
     hyperlinkListener: HyperlinkListener = defaultHyperlinkListener(state.controller),
     decorationListener: DecorationListener<ReflowableWebDecorationLocation> = defaultDecorationListener(state.controller),
     textSelectionActionModeCallback: ActionMode.Callback? = null,
+    onSelectionChanged: (DpRect?) -> Unit = {},
 ) {
     val overflowNow = state.layoutDelegate.overflow.value
 
@@ -167,12 +169,8 @@ public fun ReflowableWebRendition(
                     decorationTemplates = state.decorationDelegate.decorationTemplates,
                     decorations = decorations,
                     actionModeCallback = textSelectionActionModeCallback,
-                    onSelectionApiChanged = {
-                        state.selectionDelegate.selectionApis[index] = it
-                    },
-                    onSelectionChanged = { selecting ->
-                        state.scrollState.isSelecting = selecting
-                    },
+                    onSelectionApiChanged = { state.selectionDelegate.selectionApis[index] = it },
+                    onSelectionChanged = onSelectionChanged,
                     onTap = { tapEvent ->
                         inputListener.onTap(tapEvent, TapContext(viewportSize.value))
                     },

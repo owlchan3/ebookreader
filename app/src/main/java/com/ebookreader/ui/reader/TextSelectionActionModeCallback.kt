@@ -85,7 +85,10 @@ class TextSelectionActionModeCallback(
         return false
     }
 
-    override fun onDestroyActionMode(mode: ActionMode) {}
+    override fun onDestroyActionMode(mode: ActionMode) {
+        // The selection is natively driven by the WebView (Chromium), which clears it itself when
+        // the ActionMode ends (menu action chosen, or tap outside). Nothing to do here.
+    }
 
     private fun copyToClipboard(text: String) {
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager

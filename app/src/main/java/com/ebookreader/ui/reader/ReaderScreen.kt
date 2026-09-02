@@ -1,6 +1,10 @@
 ﻿package com.ebookreader.ui.reader
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.widget.Toast
@@ -59,7 +63,9 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Create
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -101,6 +107,8 @@ import androidx.core.content.ContextCompat
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpOffset
+import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.input.pointer.pointerInput
@@ -114,7 +122,9 @@ import com.ebookreader.domain.model.AnnotationStyle
 import com.ebookreader.ui.common.VerticalScrollbar
 import com.ebookreader.ui.common.computeScrollFraction
 import com.ebookreader.ui.common.fractionToScrollPosition
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.consumeAsFlow
 import kotlinx.coroutines.launch
 import org.readium.navigator.common.InputListener
 import org.readium.navigator.common.TapContext
@@ -123,8 +133,28 @@ import org.readium.navigator.common.defaultInputListener
 import org.readium.navigator.web.fixedlayout.FixedWebRendition
 import org.readium.navigator.web.reflowable.ReflowableWebRendition
 import org.readium.navigator.web.reflowable.preferences.ReflowableWebPreferences
+import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.ExperimentalReadiumApi
 import kotlin.math.roundToInt
+
+private fun copyToClipboard(context: Context, text: String) {
+    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    cm.setPrimaryClip(ClipData.newPlainText("selection", text))
+}
+
+private fun shareText(context: Context, text: String) {
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, text)
+    }
+    context.startActivity(Intent.createChooser(intent, "分享选中文字"))
+}
+
+/** A pending handle-drag extension, coalesced through [Channel.CONFLATED] in the reader screen. */
+private sealed interface SelectionDragOp {
+    data class ExtendStart(val offset: DpOffset) : SelectionDragOp
+    data class ExtendEnd(val offset: DpOffset) : SelectionDragOp
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalReadiumApi::class, ExperimentalFoundationApi::class)
 @Composable
@@ -192,6 +222,8 @@ fun ReaderScreen(
     var showSettingsSheet by remember { mutableStateOf(false) }
     var sliderPosition by remember { mutableFloatStateOf(0f) }
     var isDraggingProgress by remember { mutableStateOf(false) }
+    // 自定义文字选择激活时置 true，用于禁用目录边缘滑动手势（选择文字时不应拖出目录）。
+    var isSelecting by remember { mutableStateOf(false) }
 
     // Chapter refresh / delete dialogs
     var showRefreshTocDialog by remember { mutableStateOf(false) }
@@ -257,8 +289,9 @@ fun ReaderScreen(
         drawerState = drawerState,
         // PDF 用左右滑动翻页，目录收起时禁用边缘手势避免和翻页冲突；
         // 目录展开时开启手势，让 scrim 点击 / 左滑关闭目录生效（否则 Material3 内置 scrim 的
-        // onClose 会被 gesturesEnabled=false 拦截，导致点击非目录区域无法收回目录）
-        gesturesEnabled = uiState !is ReaderUiState.PdfReady || drawerState.isOpen,
+        // onClose 会被 gesturesEnabled=false 拦截，导致点击非目录区域无法收回目录）；
+        // 选择文字时也禁用边缘手势，避免拖动选择时误拖出目录。
+        gesturesEnabled = (uiState !is ReaderUiState.PdfReady && !isSelecting) || drawerState.isOpen,
         drawerContent = {
             ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
                 Column(Modifier.padding(16.dp)) {
@@ -349,27 +382,159 @@ fun ReaderScreen(
                     val context = LocalContext.current
                     val scope = rememberCoroutineScope()
                     val controller = state.controller
-                    val selectionActionMode = remember(controller) {
-                        controller?.let {
-                            TextSelectionActionModeCallback(
-                                context, it, scope,
-                                onHighlight = viewModel::onHighlightRequested,
-                                onAnnotate = viewModel::onAnnotateRequested,
-                            )
+
+                    var customSelectionRect by remember(controller) {
+                        mutableStateOf<DpRect?>(null)
+                    }
+
+                    var startHandleRect by remember(controller) {
+                        mutableStateOf<DpRect?>(null)
+                    }
+
+                    var endHandleRect by remember(controller) {
+                        mutableStateOf<DpRect?>(null)
+                    }
+
+                    var selectionRects by remember(controller) {
+                        mutableStateOf<List<DpRect>>(emptyList())
+                    }
+
+                    // Cached selection text / locator so menu buttons don't depend on a live
+                    // `currentSelection()` call (which can return null by the time they run).
+                    var selectedText by remember(controller) {
+                        mutableStateOf<String?>(null)
+                    }
+
+                    var selectedLocator by remember(controller) {
+                        mutableStateOf<Locator?>(null)
+                    }
+
+                    val dragChannel = remember(controller) { Channel<SelectionDragOp>(Channel.CONFLATED) }
+
+                    // Coalesce drag events: `collect` awaits each JS roundtrip while the CONFLATED
+                    // channel keeps only the latest position, so at most one extend is in flight.
+                    LaunchedEffect(controller) {
+                        dragChannel.consumeAsFlow().collect { op ->
+                            val geo = when (op) {
+                                is SelectionDragOp.ExtendStart -> controller?.extendSelectionStart(op.offset)
+                                is SelectionDragOp.ExtendEnd -> controller?.extendSelectionEnd(op.offset)
+                            }
+                            if (geo != null) {
+                                customSelectionRect = geo.selection.rect
+                                startHandleRect = geo.startHandleRect
+                                endHandleRect = geo.endHandleRect
+                                selectionRects = geo.selectionRects
+                                selectedText = geo.selection.text
+                                selectedLocator = geo.selection.location.toLocator()
+                            }
                         }
                     }
-                    ReflowableWebRendition(
-                        modifier = Modifier.fillMaxSize(),
-                        state = state.state,
-                        inputListener = defaultInputListener(
-                            controller = state.controller,
-                            tapEdges = setOf(androidx.compose.foundation.gestures.Orientation.Horizontal),
-                            minimumHorizontalEdgeSize = 120.dp,
-                            horizontalEdgeThresholdPercent = null,
-                            fallbackListener = centerTapListener,
-                        ),
-                        textSelectionActionModeCallback = selectionActionMode,
-                    )
+
+                    Box(Modifier.fillMaxSize()) {
+                        ReflowableWebRendition(
+                            modifier = Modifier.fillMaxSize(),
+                            state = state.state,
+                            inputListener = defaultInputListener(
+                                controller = state.controller,
+                                tapEdges = setOf(androidx.compose.foundation.gestures.Orientation.Horizontal),
+                                minimumHorizontalEdgeSize = 120.dp,
+                                horizontalEdgeThresholdPercent = null,
+                                fallbackListener = centerTapListener,
+                            ),
+                            onSelectionChanged = { rect ->
+                                customSelectionRect = rect
+                                isSelecting = rect != null
+                                if (rect == null) {
+                                    startHandleRect = null
+                                    endHandleRect = null
+                                    selectionRects = emptyList()
+                                    selectedText = null
+                                    selectedLocator = null
+                                } else {
+                                    // Initial (single-word) selection: place the handles beside the
+                                    // word's head (left) and tail (right), vertically centered on the
+                                    // line — matching the post-drag caret positions.
+                                    val lineCenterY = rect.top + (rect.bottom - rect.top) / 2
+                                    startHandleRect = DpRect(rect.left, lineCenterY, rect.left, lineCenterY)
+                                    endHandleRect = DpRect(rect.right, lineCenterY, rect.right, lineCenterY)
+                                    selectionRects = listOf(rect)
+                                    scope.launch {
+                                        val sel = controller?.currentSelection()
+                                        selectedText = sel?.text
+                                        selectedLocator = sel?.location?.toLocator()
+                                    }
+                                }
+                            },
+                        )
+
+                        customSelectionRect?.let { rect ->
+                            CustomSelectionOverlay(
+                                rect = rect,
+                                startHandleRect = startHandleRect,
+                                endHandleRect = endHandleRect,
+                                selectionRects = selectionRects,
+                                onCopy = {
+                                    scope.launch {
+                                        val live = controller?.currentSelection()?.text
+                                        val text = listOfNotNull(live, selectedText).firstOrNull { it.isNotBlank() }
+                                        if (!text.isNullOrBlank()) {
+                                            copyToClipboard(context, text)
+                                            Toast.makeText(context, "已复制", Toast.LENGTH_SHORT).show()
+                                        }
+                                        controller?.clearSelection()
+                                    }
+                                },
+                                onShare = {
+                                    scope.launch {
+                                        val live = controller?.currentSelection()?.text
+                                        val text = listOfNotNull(live, selectedText).firstOrNull { it.isNotBlank() }
+                                        if (!text.isNullOrBlank()) {
+                                            shareText(context, text)
+                                        }
+                                        controller?.clearSelection()
+                                    }
+                                },
+                                onHighlight = {
+                                    scope.launch {
+                                        val sel = controller?.currentSelection()
+                                        val liveText = sel?.text
+                                        val liveLocator = sel?.location?.toLocator()
+                                        val text = listOfNotNull(liveText, selectedText).firstOrNull { it.isNotBlank() }
+                                        val locator = selectedLocator ?: liveLocator
+                                        if (!text.isNullOrBlank() && locator != null) {
+                                            viewModel.onHighlightRequested(text, locator)
+                                        }
+                                        controller?.clearSelection()
+                                    }
+                                },
+                                onAnnotate = {
+                                    scope.launch {
+                                        val sel = controller?.currentSelection()
+                                        val liveText = sel?.text
+                                        val liveLocator = sel?.location?.toLocator()
+                                        val text = listOfNotNull(liveText, selectedText).firstOrNull { it.isNotBlank() }
+                                        val locator = selectedLocator ?: liveLocator
+                                        if (!text.isNullOrBlank() && locator != null) {
+                                            viewModel.onAnnotateRequested(text, locator)
+                                        }
+                                        controller?.clearSelection()
+                                    }
+                                },
+                                onDismiss = {
+                                    controller?.clearSelection()
+                                    customSelectionRect = null
+                                    isSelecting = false
+                                },
+                                onExtendStart = { offset ->
+                                    dragChannel.trySend(SelectionDragOp.ExtendStart(offset))
+                                },
+                                onExtendEnd = { offset ->
+                                    dragChannel.trySend(SelectionDragOp.ExtendEnd(offset))
+                                },
+                            )
+                        }
+
+                    }
                 }
                 is ReaderUiState.FixedReady -> {
                     val context = LocalContext.current
@@ -1064,17 +1229,17 @@ fun ReaderScreen(
                         tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                     Slider(value = fontSize.toFloat(),
                         onValueChange = {
-                            // 有级调节：吸附到 0.1 步进，避免滑动时出现连续无级值
-                            val stepped = ((it * 10).roundToInt() / 10.0).coerceIn(0.5, 2.5)
+                            // 有级调节：吸附到 0.05 步进（0.8–1.5），避免滑动时出现连续无级值
+                            val stepped = ((it * 20).roundToInt() / 20.0).coerceIn(0.8, 1.5)
                             viewModel.applyFontSize(stepped)
                         },
-                        valueRange = 0.5f..2.5f,
-                        steps = 19,
+                        valueRange = 0.8f..1.5f,
+                        steps = 13,
                         modifier = Modifier.weight(1f))
                     Icon(Icons.Default.FormatSize, null, Modifier.size(24.dp),
                         tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                 }
-                Text("${"%.1f".format(fontSize)}x", fontSize = 12.sp,
+                Text("${"%.2f".format(fontSize).trimEnd('0').trimEnd('.')}x", fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                 Spacer(Modifier.height(16.dp)); HorizontalDivider(); Spacer(Modifier.height(12.dp))
                 Text("亮度", fontWeight = FontWeight.Medium); Spacer(Modifier.height(4.dp))

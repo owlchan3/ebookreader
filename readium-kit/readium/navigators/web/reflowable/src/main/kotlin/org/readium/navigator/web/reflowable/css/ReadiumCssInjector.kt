@@ -351,7 +351,11 @@ internal fun ReadiumCssInjector.withSettings(settings: ReflowableWebSettings): R
 
     return with(settings) {
         copy(
-            disableSelection = !scroll,
+            // Always disable native text selection. The app drives selection programmatically
+            // (`selectAtPoint`) and renders its own highlight/menu/handles, so the system's native
+            // selection handles must never appear. `user-select:none` also hides the native highlight,
+            // which the app replaces with a Compose overlay.
+            disableSelection = true,
             layout = ReadiumCssLayout.from(settings),
             rsProperties = rsProperties.copy(
                 textColor = textColor.toCss(),

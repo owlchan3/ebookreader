@@ -3,13 +3,12 @@
  * Use of this source code is governed by the BSD-style license
  * available in the top-level LICENSE file of the project.
  */
-@file:OptIn(ExperimentalReadiumApi::class, InternalReadiumApi::class)
+
+@file:OptIn(ExperimentalReadiumApi::class)
 
 package org.readium.navigator.web.reflowable.resource
 
 import android.annotation.SuppressLint
-import android.graphics.Rect
-import android.util.Log
 import android.view.ActionMode
 import android.view.MotionEvent
 import android.view.View
@@ -23,16 +22,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.DpOffset
+import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
-import kotlin.math.roundToInt
 import kotlinx.collections.immutable.ImmutableMap
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.launchIn
@@ -65,7 +65,6 @@ import org.readium.navigator.web.internals.webapi.SelectionListenerApi
 import org.readium.navigator.web.internals.webview.RelaxedWebView
 import org.readium.navigator.web.internals.webview.WebView
 import org.readium.navigator.web.internals.webview.WebViewScrollController
-import org.readium.navigator.web.internals.webview.evaluateJavaScriptSuspend
 import org.readium.navigator.web.internals.webview.invokeOnWebViewUpToDate
 import org.readium.navigator.web.internals.webview.rememberWebViewState
 import org.readium.navigator.web.reflowable.ReflowableWebDecoration
@@ -74,7 +73,6 @@ import org.readium.navigator.web.reflowable.ReflowableWebDecorationLocation
 import org.readium.navigator.web.reflowable.ReflowableWebDecorationTextQuoteLocation
 import org.readium.navigator.web.reflowable.css.ReadiumCssInjector
 import org.readium.r2.shared.ExperimentalReadiumApi
-import org.readium.r2.shared.InternalReadiumApi
 import org.readium.r2.shared.util.AbsoluteUrl
 import timber.log.Timber
 
@@ -94,7 +92,7 @@ internal fun ReflowableResource(
     decorations: ImmutableMap<String, List<ReflowableWebDecoration>>,
     actionModeCallback: ActionMode.Callback?,
     onSelectionApiChanged: (ReflowableSelectionApi?) -> Unit,
-    onSelectionChanged: (Boolean) -> Unit,
+    onSelectionChanged: (DpRect?) -> Unit,
     onTap: (TapEvent) -> Unit,
     onLinkActivated: (AbsoluteUrl, String) -> Unit,
     onDecorationActivated: (DecorationListener.OnActivatedEvent<ReflowableWebDecorationLocation>) -> Unit,
@@ -157,6 +155,8 @@ internal fun ReflowableResource(
 
         val onSelectionChangedRef by rememberUpdatedRef(onSelectionChanged)
 
+        val scope = rememberCoroutineScope()
+
         LaunchedEffect(webViewState.webView, padding) {
             webViewState.webView?.let { webView ->
                 val listener = DelegatingReflowableApiStateListener(
@@ -164,7 +164,7 @@ internal fun ReflowableResource(
                         cssApi = ReadiumCssApi(webView)
                     },
                     onSelectionApiAvailableDelegate = {
-                        selectionApi = ReflowableSelectionApi(webView) { it.shift(paddingShift) }
+                        selectionApi = ReflowableSelectionApi(webView, paddingShift)
                         onSelectionApiChangedRef(selectionApi)
                     },
                     onDecorationApiAvailableDelegate = {
@@ -320,38 +320,27 @@ internal fun ReflowableResource(
             }
         }
 
-        LaunchedEffect(gesturesApi, selectionListenerApi, onTap, onLinkActivated, padding, orientation, webViewState.webView) {
+        LaunchedEffect(gesturesApi, selectionListenerApi, onTap, onLinkActivated, padding) {
             gesturesApi?.let { gesturesApi ->
                 selectionListenerApi?.let { selectionListenerApi ->
-                    val webView = webViewState.webView
-                    val scope = this
                     var isSelecting = false
-
-                    // In paginated mode, freeze the scroll while a text selection is active so that
-                    // dragging a selection handle near a column boundary is not interpreted as a page
-                    // turn (which over-scrolls the viewport back to the chapter start and expands the
-                    // selection there). See https://github.com/readium/kotlin-toolkit/issues/325
-                    val horizontal = orientation == Orientation.Horizontal
-
                     selectionListenerApi.listener = DelegatingSelectionListener(
-                        onSelectionStartDelegate = {
-                            Log.d("SelectionFix", "onSelectionStart")
-                            isSelecting = true
-                            webView?.freezeScroll = horizontal
-                            onSelectionChangedRef(true)
-                        },
+                        onSelectionStartDelegate = { isSelecting = true },
                         onSelectionEndDelegate = {
-                            Log.d("SelectionFix", "onSelectionEnd")
                             isSelecting = false
-                            webView?.freezeScroll = false
-                            onSelectionChangedRef(false)
+                            // The programmatic selection was cleared (tap outside, menu action, or
+                            // explicit clear). Hide the custom selection UI.
+                            onSelectionChangedRef(null)
                         }
                     )
 
                     gesturesApi.listener = DelegatingGesturesListener(
                         onTapDelegate = { offset ->
-                            // There's an on-going selection, the tap will dismiss it so we don't forward it.
+                            // An on-going (programmatic) selection: this tap dismisses it. Native
+                            // selection is disabled, so we must clear the selection ourselves and
+                            // swallow the tap (otherwise it would also toggle the reader UI).
                             if (isSelecting) {
+                                selectionApi?.clearSelection()
                                 return@DelegatingGesturesListener
                             }
 
@@ -372,6 +361,27 @@ internal fun ReflowableResource(
                             onDecorationActivated(event)
                         }
                     )
+                }
+            }
+        }
+
+        LaunchedEffect(webViewState.webView, selectionApi, density, padding) {
+            webViewState.webView?.let { webView ->
+                selectionApi?.let { selectionApi ->
+                    webView.setSelectionLongPressListener { xPx, yPx ->
+                        val offset = DpOffset(
+                            x = with(density) { xPx.toDp() },
+                            y = with(density) { yPx.toDp() }
+                        )
+                        scope.launch {
+                            try {
+                                val selection = selectionApi.selectAtPoint(offset)
+                                onSelectionChangedRef(selection?.selectionRect)
+                            } catch (_: Throwable) {
+                                // Selection failed; nothing to render.
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -432,9 +442,9 @@ internal fun ReflowableResource(
         }
 
         LaunchedEffect(webViewState.webView, actionModeCallback) {
-            webViewState.webView?.let { wv ->
-                wv.setCustomSelectionActionModeCallback(actionModeCallback)
-            }
+            webViewState.webView?.setCustomSelectionActionModeCallback(
+                callback = actionModeCallback
+            )
         }
 
         val orientationRef by rememberUpdatedRef(orientation)
@@ -459,10 +469,6 @@ internal fun ReflowableResource(
                     webview.isVerticalScrollBarEnabled = false
                     webview.isHorizontalScrollBarEnabled = false
                     webview.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-                    // Enable long press text selection only in scroll mode. In paginated (CSS
-                    // multi-column) mode, cross-column selection "flickers", so long-press selection
-                    // is disabled there; programmatic selection APIs are unaffected.
-                    webview.isLongClickable = scroll
                     // Prevents vertical scrolling towards blank space.
                     // See https://github.com/readium/readium-css/issues/158
                     webview.setOnTouchListener { view, event ->
@@ -477,37 +483,6 @@ internal fun ReflowableResource(
             )
         }
     }
-}
-
-/**
- * Returns the bounding rect of the current text selection in this view's coordinates, or null when
- * there is no non-collapsed selection. The rect is used to position the floating selection menu when
- * it is re-shown manually after a selection "flicker".
- */
-private suspend fun RelaxedWebView.selectionContentRect(): Rect? {
-    val result = evaluateJavaScriptSuspend(
-        """
-        (function() {
-            var s = window.getSelection();
-            if (!s || s.rangeCount === 0 || s.isCollapsed) return '';
-            var r = s.getRangeAt(0).getBoundingClientRect();
-            var zoom = document.body.currentCSSZoom || 1;
-            return [r.left / zoom, r.top / zoom, r.right / zoom, r.bottom / zoom].join(',');
-        })()
-        """.trimIndent()
-    )
-    // evaluateJavascript returns the string JSON-encoded, e.g. "\"12.0,34.0,56.0,78.0\"".
-    val parts = result.trim().removeSurrounding("\"").split(',')
-    if (parts.size != 4) return null
-    val numbers = parts.mapNotNull { it.toDoubleOrNull() }
-    if (numbers.size != 4) return null
-    val density = context.resources.displayMetrics.density
-    return Rect(
-        (numbers[0] * density).roundToInt(),
-        (numbers[1] * density).roundToInt(),
-        (numbers[2] * density).roundToInt(),
-        (numbers[3] * density).roundToInt(),
-    )
 }
 
 private fun ReflowableWebDecoration.toWebApiDecoration(

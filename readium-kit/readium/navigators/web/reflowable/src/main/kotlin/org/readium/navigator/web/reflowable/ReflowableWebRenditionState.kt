@@ -22,6 +22,8 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
+import androidx.compose.ui.unit.DpOffset
+import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.DpSize
 import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.PersistentMap
@@ -283,7 +285,7 @@ public class ReflowableWebRenditionController internal constructor(
     internal val navigationDelegate: ReflowableNavigationDelegate,
     private val layoutDelegate: ReflowableLayoutDelegate,
     decorationDelegate: ReflowableDecorationDelegate,
-    selectionDelegate: ReflowableSelectionDelegate,
+    private val selectionDelegate: ReflowableSelectionDelegate,
 ) : NavigationController<ReflowableWebLocation, ReflowableWebGoLocation> by navigationDelegate,
     OverflowController by navigationDelegate,
     PreferencesController<ReflowableWebPreferences, ReflowableWebSettings> by layoutDelegate,
@@ -300,6 +302,22 @@ public class ReflowableWebRenditionController internal constructor(
     /** 计算当前章节内一段文字 [textAnchor] 的渲染进度（0..1），供听书定位/翻页。 */
     public suspend fun getProgressionForTextAnchor(textAnchor: TextAnchor): Double? =
         navigationDelegate.getProgressionForTextAnchor(textAnchor)
+
+    /** 将当前选区的起点扩展到 [offset]（Box 坐标），返回更新后的选区与手柄矩形。 */
+    public suspend fun extendSelectionStart(offset: DpOffset): ReflowableSelectionGeometry? =
+        selectionDelegate.extendStart(offset)
+
+    /** 将当前选区的终点扩展到 [offset]（Box 坐标），返回更新后的选区与手柄矩形。 */
+    public suspend fun extendSelectionEnd(offset: DpOffset): ReflowableSelectionGeometry? =
+        selectionDelegate.extendEnd(offset)
+
+    /** 当前选区起点 caret 的矩形（Box 坐标），用于绘制起点手柄。 */
+    public suspend fun getSelectionStartHandleRect(): DpRect? =
+        selectionDelegate.getStartHandleRect()
+
+    /** 当前选区终点 caret 的矩形（Box 坐标），用于绘制终点手柄。 */
+    public suspend fun getSelectionEndHandleRect(): DpRect? =
+        selectionDelegate.getEndHandleRect()
 }
 
 @OptIn(ExperimentalReadiumApi::class, InternalReadiumApi::class)
@@ -566,6 +584,14 @@ internal class ReflowableDecorationDelegate(
         mutableStateOf(persistentMapOf())
 }
 
+/** The result of extending a selection: the updated selection plus its precise handle caret rects. */
+public data class ReflowableSelectionGeometry(
+    public val selection: Selection<ReflowableWebSelectionLocation>,
+    public val startHandleRect: DpRect,
+    public val endHandleRect: DpRect,
+    public val selectionRects: List<DpRect>,
+)
+
 internal class ReflowableSelectionDelegate(
     private val publication: ReflowableWebPublication,
     private val pagerState: PagerState,
@@ -575,14 +601,53 @@ internal class ReflowableSelectionDelegate(
         mutableStateMapOf()
 
     override suspend fun currentSelection(): Selection<ReflowableWebSelectionLocation>? {
+        val (index, selection) = withVisibleSelectionApi { it.getCurrentSelection() } ?: return null
+        return buildSelection(index, selection)
+    }
+
+    suspend fun extendStart(offset: DpOffset): ReflowableSelectionGeometry? {
+        val (index, selection) = withVisibleSelectionApi { it.extendStart(offset) } ?: return null
+        return ReflowableSelectionGeometry(
+            selection = buildSelection(index, selection),
+            startHandleRect = selection.startHandleRect ?: selection.selectionRect,
+            endHandleRect = selection.endHandleRect ?: selection.selectionRect,
+            selectionRects = selection.selectionRects,
+        )
+    }
+
+    suspend fun extendEnd(offset: DpOffset): ReflowableSelectionGeometry? {
+        val (index, selection) = withVisibleSelectionApi { it.extendEnd(offset) } ?: return null
+        return ReflowableSelectionGeometry(
+            selection = buildSelection(index, selection),
+            startHandleRect = selection.startHandleRect ?: selection.selectionRect,
+            endHandleRect = selection.endHandleRect ?: selection.selectionRect,
+            selectionRects = selection.selectionRects,
+        )
+    }
+
+    suspend fun getStartHandleRect(): DpRect? =
+        withVisibleSelectionApi { it.getStartHandleRect() }?.second
+
+    suspend fun getEndHandleRect(): DpRect? =
+        withVisibleSelectionApi { it.getEndHandleRect() }?.second
+
+    private suspend fun <T> withVisibleSelectionApi(
+        transform: suspend (ReflowableSelectionApi) -> T?,
+    ): Pair<Int, T>? {
         val visiblePages = pagerState.layoutInfo.visiblePagesInfo.map { it.index }
-        val (index, selection) = visiblePages
-            .mapNotNull { index -> selectionApis[index]?.let { index to it } }
-            .firstNotNullOfOrNull { (index, api) -> api.getCurrentSelection()?.let { index to it } }
-            ?: return null
+        for (index in visiblePages) {
+            val api = selectionApis[index] ?: continue
+            val result = transform(api) ?: continue
+            return index to result
+        }
+        return null
+    }
 
+    private fun buildSelection(
+        index: Int,
+        selection: org.readium.navigator.web.internals.webapi.Selection,
+    ): Selection<ReflowableWebSelectionLocation> {
         val selectionItem = publication.readingOrder.items[index]
-
         return Selection(
             selection.selectedText,
             selection.selectionRect,

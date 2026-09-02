@@ -7,14 +7,19 @@
 package org.readium.navigator.web.internals.webview
 
 import android.content.Context
-import android.graphics.Rect
-import android.util.Log
 import android.view.ActionMode
-import android.view.View
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.webkit.WebView
 
 /**
  * WebView allowing access to some protected fields.
+ *
+ * Native text selection is disabled here: the app drives selection programmatically
+ * (`selection.selectAtPoint`) and renders its own highlight/menu/handles, so the system's selection
+ * ActionMode (drag handles + toolbar) must never appear. Long-presses are still detected via a
+ * [GestureDetector] and forwarded to [setSelectionLongPressListener] so the app can start a custom
+ * selection at the touch position.
  */
 public class RelaxedWebView(context: Context) : WebView(context) {
 
@@ -48,53 +53,40 @@ public class RelaxedWebView(context: Context) : WebView(context) {
     public val horizontalScrollExtent: Int get() =
         computeHorizontalScrollExtent()
 
-
     private var nextLayoutListener: (() -> Unit) = {}
 
     public fun setNextLayoutListener(block: () -> Unit) {
         nextLayoutListener = block
     }
 
-    private var actionModeCallback: ActionMode.Callback? = null
-
-    public fun setCustomSelectionActionModeCallback(
-        callback: ActionMode.Callback?,
-    ) {
-        actionModeCallback = callback
+    init {
+        // Prevent Chromium from starting native text selection on long-press.
+        isLongClickable = false
+        isHapticFeedbackEnabled = false
     }
 
     /**
-     * The text-selection action mode currently shown, whether it was started by the WebView itself
-     * or re-triggered manually after a selection "flicker".
+     * Long-press listener, invoked with the touch position in this WebView's local (physical) pixels,
+     * excluding any padding applied by the caller.
      */
-    private var selectionMode: ActionMode? = null
+    private var onLongPressListener: ((Float, Float) -> Unit)? = null
 
-    /**
-     * When `true`, the WebView refuses to over-scroll its viewport. Used in paginated mode while a
-     * text selection is active: dragging a selection handle near the viewport edge makes the Android
-     * WebView over-scroll back to the start of the chapter, which expands the selection there.
-     * Freezing the scroll keeps the selection anchored to the current page. This is the same
-     * workaround as the legacy navigator's `onOverScrolled` suppression.
-     * See https://github.com/readium/kotlin-toolkit/issues/325
-     */
-    public var freezeScroll: Boolean = false
+    public fun setSelectionLongPressListener(listener: ((Float, Float) -> Unit)?) {
+        onLongPressListener = listener
+    }
 
-    override fun onOverScrolled(scrollX: Int, scrollY: Int, clampedX: Boolean, clampedY: Boolean) {
-        if (freezeScroll) {
-            return
+    private val gestureDetector = GestureDetector(
+        context,
+        object : GestureDetector.SimpleOnGestureListener() {
+            override fun onLongPress(e: MotionEvent) {
+                onLongPressListener?.invoke(e.x, e.y)
+            }
         }
-        super.onOverScrolled(scrollX, scrollY, clampedX, clampedY)
-    }
+    )
 
-    /**
-     * Invoked whenever the text-selection action mode is destroyed, whether by the user dismissing it
-     * or by Chromium dropping it during a CSS-column "flicker". Lets the caller re-show the menu when
-     * the selection is still active.
-     */
-    private var onSelectionModeDestroyedListener: (() -> Unit)? = null
-
-    public fun setOnSelectionModeDestroyedListener(listener: (() -> Unit)?) {
-        onSelectionModeDestroyedListener = listener
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        gestureDetector.onTouchEvent(event)
+        return super.onTouchEvent(event)
     }
 
     @Suppress("Deprecation")
@@ -105,101 +97,19 @@ public class RelaxedWebView(context: Context) : WebView(context) {
         nextLayoutListener = {}
     }
 
-    override fun startActionMode(callback: ActionMode.Callback): ActionMode? {
-        return startActionMode(callback, ActionMode.TYPE_PRIMARY)
-    }
-
-    override fun startActionMode(callback: ActionMode.Callback, type: Int): ActionMode? {
-        val wrapper = Callback2Wrapper(
-            callback = actionModeCallback ?: callback,
-            callback2 = callback as? ActionMode.Callback2,
-            onDestroyed = {
-                selectionMode = null
-                onSelectionModeDestroyedListener?.invoke()
-            },
-        )
-
-        val mode = if (actionModeCallback == null) {
-            super.startActionMode(wrapper, type)
-        } else {
-            val parent = parent ?: return null
-            parent.startActionModeForChild(this, wrapper, type)
-        }
-        selectionMode = mode
-        return mode
-    }
-
     /**
-     * Re-shows the text-selection floating menu after it was dismissed by a selection "flicker"
-     * (the selection transiently collapsing and re-expanding while a handle is dragged across a CSS
-     * column boundary). Chromium fails to re-show the menu in that case, so we start it manually.
-     *
-     * @param contentRect the selection's bounding rect in this view's coordinates, used to position
-     * the floating toolbar; may be null to fall back to the whole view.
+     * Never start the native selection ActionMode (drag handles + toolbar). Returning null is a
+     * defensive backstop; `user-select:none` already prevents Chromium from initiating selection.
      */
-    public fun isSelectionActionModeActive(): Boolean = selectionMode != null
+    override fun startActionMode(callback: ActionMode.Callback): ActionMode? = null
 
-    /**
-     * Re-queries the selection's content rect and repositions the floating toolbar. Used to recover
-     * the menu after a CSS-column "flicker" leaves it positioned off-screen while the selection is
-     * still active: Chromium re-runs `onGetContentRect` and moves the toolbar back over the selection.
-     */
-    public fun invalidateSelectionActionMode() {
-        selectionMode?.invalidateContentRect()
-    }
+    override fun startActionMode(callback: ActionMode.Callback, type: Int): ActionMode? = null
 
-    public fun showSelectionActionMode(contentRect: Rect?): ActionMode? {
-        val callback = actionModeCallback
-        Log.d("SelectionFix", "show: callback=${callback != null} selectionMode=${selectionMode != null} rect=$contentRect parent=${parent != null}")
-        if (callback == null) return null
-        selectionMode?.let { return it }
-        val wrapper = Callback2Wrapper(
-            callback = callback,
-            callback2 = null,
-            contentRect = contentRect,
-            onDestroyed = {
-                selectionMode = null
-                onSelectionModeDestroyedListener?.invoke()
-            },
-        )
-        val parent = parent ?: return null
-        val mode = parent.startActionModeForChild(this, wrapper, ActionMode.TYPE_FLOATING)
-        selectionMode = mode
-        Log.d("SelectionFix", "show: result mode=${mode != null}")
-        return mode
-    }
-
-    /**
-     * Finishes a manually re-shown selection menu. Unlike a menu started by the WebView itself, this
-     * one is not tracked by Chromium, so it has to be dismissed explicitly when the selection ends.
-     */
-    public fun finishSelectionActionMode() {
-        Log.d("SelectionFix", "finish: selectionMode=${selectionMode != null}")
-        selectionMode?.finish()
-        selectionMode = null
-    }
-}
-
-private class Callback2Wrapper(
-    val callback: ActionMode.Callback,
-    val callback2: ActionMode.Callback2?,
-    val contentRect: Rect? = null,
-    val onDestroyed: () -> Unit = {},
-) : ActionMode.Callback by callback, ActionMode.Callback2() {
-
-    override fun onGetContentRect(mode: ActionMode, view: View, outRect: Rect) {
-        val rect = contentRect
-        when {
-            rect != null -> outRect.set(rect)
-            callback2 != null -> callback2.onGetContentRect(mode, view, outRect)
-            else -> super.onGetContentRect(mode, view, outRect)
-        }
-    }
-
-    override fun onDestroyActionMode(mode: ActionMode) {
-        Log.d("SelectionFix", "onDestroyActionMode")
-        onDestroyed()
-        callback.onDestroyActionMode(mode)
+    public fun setCustomSelectionActionModeCallback(
+        @Suppress("UNUSED_PARAMETER") callback: ActionMode.Callback?,
+    ) {
+        // Native selection ActionMode is disabled; kept only for API compatibility with the
+        // ReflowableResource wiring.
     }
 }
 

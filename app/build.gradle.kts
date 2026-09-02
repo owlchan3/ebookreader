@@ -34,8 +34,8 @@ android {
         applicationId = "com.ebookreader"
         minSdk = 26
         targetSdk = 36
-        versionCode = 64
-        versionName = "1.0.1"
+        versionCode = 68
+        versionName = "1.0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

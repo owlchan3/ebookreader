@@ -48,22 +48,12 @@ public class RenditionScrollState(
     private val reverseLayout get() =
         orientation == Orientation.Horizontal && direction == LayoutDirection.Rtl
 
-    /**
-     * While a text selection is active, freeze the pager's scroll gesture so that dragging a
-     * selection handle near a column boundary is not interpreted as a page turn. Otherwise the
-     * viewport scrolls back to the chapter start and the selection expands there.
-     */
-    public var isSelecting: Boolean = false
-
     /*
      * To ease the reasoning, this function applies reverse scrolling:
      * - a positive delta (finger moved to the right) makes the viewport scrolling left
      * - a negative delta (finger moved to the left) makes the viewport scrolling right
      */
     private fun dispatchRawDelta(available: Float): Float {
-        if (isSelecting && orientation == Orientation.Horizontal) {
-            return 0f
-        }
         Timber.d("scrollBy available $available")
         Timber.d("visiblePages ${pagerState.layoutInfo.visiblePagesInfo.map { it.index to it.offset }}")
         var deltaLeft = available

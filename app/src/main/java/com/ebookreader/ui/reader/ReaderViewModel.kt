@@ -377,7 +377,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 val readerPrefs = app.getSharedPreferences("reader_prefs", Context.MODE_PRIVATE)
-                val savedFontSize = readerPrefs.getFloat("reader_font_size", 1.0f).toDouble().coerceIn(0.5, 2.5)
+                val savedFontSize = readerPrefs.getFloat("reader_font_size", 1.0f).toDouble().coerceIn(0.8, 1.5)
                 val savedTheme = readerPrefs.getString("reader_theme", "default") ?: "default"
                 val savedBrightness = readerPrefs.getFloat("reader_brightness", 1.0f).coerceIn(0.2f, 1.0f)
                 val savedScroll = readerPrefs.getBoolean("reader_scroll", false)
@@ -1087,6 +1087,11 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     // Preferences
     fun applyFontSize(size: Double) {
+        // 改字号前记录当前阅读位置（href + progression，二者按内容 position 定义、与字号无关），
+        // 改完重排后恢复，确保不跳到章首或错页。
+        val ctrl = (_uiState.value as? ReaderUiState.Ready)?.controller
+        val prevLoc = ctrl?.location
+
         _fontSize.value = size
         val base = when (_themeKey.value) {
             "sepia" -> ReflowableWebPreferences.SepiaTheme
@@ -1099,11 +1104,19 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         if (s is ReaderUiState.Ready && s.controller != null) s.controller.preferences = newPrefs
 
         // 切换字号：切到新字号对应的页数缓存键并重载，避免新旧字号的每章页数混用、
-        // 以及把新字号页数写进旧字号缓存。位置由渲染器重排后经 updatePagePosition 重新校准。
+        // 以及把新字号页数写进旧字号缓存。
         _book.value?.let { book ->
             loadCachedPageCounts(book.id, size)
             if (_uiState.value is ReaderUiState.Ready) {
                 _totalPages.value = pageCounts().sum()
+            }
+        }
+
+        // 恢复字号调整前的阅读位置：重排（可能重建 WebView）是异步的，稍等片刻再 goTo。
+        if (ctrl != null && prevLoc != null) {
+            viewModelScope.launch {
+                delay(300)
+                ctrl.goTo(ReflowableWebGoLocation(href = prevLoc.href, progression = prevLoc.progression))
             }
         }
     }
