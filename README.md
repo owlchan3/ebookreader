@@ -128,21 +128,11 @@
 
 采用经典 **三层架构 + 手动依赖注入**（未使用 Hilt / Koin）：
 
-```
-┌─────────────────────────────────────────────┐
-│ UI 层   ui/*Screen  ui/*ViewModel  ui/*Engine │
-│         通过 Injector 获取 Repository / DAO   │
-├─────────────────────────────────────────────┤
-│ Domain 层  domain/model（纯 Kotlin 领域模型） │
-│            domain/repository（接口，不依赖 Room）│
-├─────────────────────────────────────────────┤
-│ Data 层   data/local（Entity + DAO + AppDatabase）│
-│           data/mapper（Entity ↔ Domain 映射）│
-│           data/repository（Repository 实现）  │
-│           data/network（外部服务客户端）        │
-│           data/importer / data/backup         │
-└─────────────────────────────────────────────┘
-```
+| 层 | 内容 |
+|---|---|
+| **UI 层** | `ui/*Screen` · `ui/*ViewModel` · `ui/*Engine`<br>通过 `Injector` 获取 Repository / DAO |
+| **Domain 层** | `domain/model`（纯 Kotlin 领域模型）<br>`domain/repository`（接口，不依赖 Room） |
+| **Data 层** | `data/local`（Entity + DAO + AppDatabase）<br>`data/mapper`（Entity ↔ Domain 映射）<br>`data/repository`（Repository 实现）<br>`data/network`（外部服务客户端）<br>`data/importer` · `data/backup` |
 
 - 依赖注入：`Injector` 为 Kotlin `object`（进程级服务定位器），`init(context)` 一次性装配数据库、5 个 Repository 与 3 个网络客户端。
 - 列表类查询普遍返回 `Flow<List<T>>`，写操作与单条查询用 `suspend`。
