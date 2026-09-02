@@ -28,7 +28,8 @@
 - 「批注与划线」列表（Tab 切换、编辑笔记）
 - 书籍内全文搜索（命中词高亮）
 - 阅读设置：字体大小 0.5–2.5x、亮度 20–100%、主题（默认/棕褐/暗黑）、翻页模式
-- 选中文字：复制 / 分享 / 划线 / 批注（翻页 / 滚动模式均可用）
+- 选中文字：复制 / 分享 / 划线 / 批注 / 词典（翻页 / 滚动模式均可用）
+- 离线词典：中文查萌典（教育部《重編國語辭典修訂本》）、外文查 ECDICT 英汉词典；本地离线、首次查询懒加载
 - TTS 听书：本地系统引擎 或 OpenAI 兼容云端合成；面板可拖动，支持上一句/播放暂停/下一句/停止、当前句高亮
 - 阅读进度自动保存（每日阅读会话 + 每本书每日阅读记录）
 
@@ -251,6 +252,22 @@ ebook-reader/
 ./gradlew assembleRelease
 # 输出：app/build/outputs/apk/release/app-release.apk
 ```
+
+## 离线词典数据
+
+「词典」功能依赖本地离线词库（约 49 MB，**未纳入 Git 仓库**）。首次构建前需手动放入以下两个文件：
+
+| 文件 | 用途 | 数据来源 |
+|---|---|---|
+| `app/src/main/assets/dictionaries/moedict.jsonl` | 中文-中文词典（教育部《重編國語辭典修訂本》，萌典整理版，简体已转换） | 萌典 [g0v/moedict-data](https://github.com/g0v/moedict-data) |
+| `app/src/main/assets/dictionaries/ecdict.jsonl` | 英汉词典（ECDICT 常用词子集） | [skywind3000/ECDICT](https://github.com/skywind3000/ECDICT) |
+
+两文件为 JSONL（每行一条，`\t` 分隔），格式：
+
+- `moedict.jsonl`：`简体 \t 繁体 \t 异读JSON数组`，数组形如 `[{"p":"拼音","d":[{"d":"释义","t":"词性","q":["例句","典故"]}]}]`
+- `ecdict.jsonl`：`小写词头 \t {"w":"原始词头","p":"音标","t":"中文翻译(多行)"}`
+
+未放入数据文件时，词典查询会提示「未找到」，其余功能不受影响。
 
 ## Release 签名
 

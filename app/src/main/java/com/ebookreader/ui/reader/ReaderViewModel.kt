@@ -14,6 +14,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ebookreader.data.local.entity.DailyBookReadingEntity
 import com.ebookreader.data.local.entity.DailyReadingSessionEntity
+import com.ebookreader.data.dictionary.DictionaryService
 import com.ebookreader.data.importer.BookImporter
 import com.ebookreader.data.network.ApiKeyManager
 import com.ebookreader.di.Injector
@@ -21,6 +22,7 @@ import com.ebookreader.domain.model.Annotation
 import com.ebookreader.domain.model.AnnotationStyle
 import com.ebookreader.domain.model.Book
 import com.ebookreader.domain.model.Bookmark
+import com.ebookreader.domain.model.LookupState
 import com.ebookreader.domain.repository.AnnotationRepository
 import com.ebookreader.domain.repository.BookRepository
 import com.ebookreader.domain.repository.BookmarkRepository
@@ -133,6 +135,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     private val bookRepository: BookRepository = Injector.bookRepository()
     private val bookmarkRepository: BookmarkRepository = Injector.bookmarkRepository()
     private val annotationRepository: AnnotationRepository = Injector.annotationRepository()
+    private val dictionaryService: DictionaryService = Injector.dictionaryService()
 
     private val _book = MutableStateFlow<Book?>(null)
     val book: StateFlow<Book?> = _book.asStateFlow()
@@ -151,6 +154,9 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _pendingAnnotation = MutableStateFlow<PendingSelection?>(null)
     val pendingAnnotation: StateFlow<PendingSelection?> = _pendingAnnotation.asStateFlow()
+
+    private val _lookupState = MutableStateFlow<LookupState>(LookupState.Idle)
+    val lookupState: StateFlow<LookupState> = _lookupState.asStateFlow()
 
     /** 当前 TTS 高亮装饰；与批注装饰合并渲染，避免互相覆盖。 */
     private var ttsDecor: Decoration<ReflowableWebDecorationLocation>? = null
@@ -991,6 +997,22 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     fun dismissPendingHighlight() { _pendingHighlight.value = null }
     fun dismissPendingAnnotation() { _pendingAnnotation.value = null }
+
+    // ── 词典查询（中文→离线萌典；外文→在线谷歌翻译）──────────────────────
+    fun onLookupRequested(text: String) {
+        val query = text.trim()
+        if (query.isEmpty()) return
+        viewModelScope.launch {
+            _lookupState.value = LookupState.Loading
+            _lookupState.value = try {
+                LookupState.Success(dictionaryService.lookup(query))
+            } catch (e: Exception) {
+                LookupState.Error(e.message ?: "查询失败")
+            }
+        }
+    }
+
+    fun dismissLookup() { _lookupState.value = LookupState.Idle }
 
     fun applyHighlight(style: AnnotationStyle, color: Int) {
         val pending = _pendingHighlight.value ?: return

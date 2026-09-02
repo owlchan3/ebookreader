@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Create
@@ -56,6 +57,7 @@ internal fun CustomSelectionOverlay(
     onShare: () -> Unit,
     onHighlight: () -> Unit,
     onAnnotate: () -> Unit,
+    onDictionary: () -> Unit,
     onDismiss: () -> Unit,
     onExtendStart: (DpOffset) -> Unit,
     onExtendEnd: (DpOffset) -> Unit,
@@ -115,7 +117,7 @@ internal fun CustomSelectionOverlay(
             )
         }
 
-        val menuWidth = 200.dp
+        val menuWidth = 256.dp
         val menuHeight = 52.dp
         val menuX = (rect.left + (rect.right - rect.left) / 2 - menuWidth / 2)
             .coerceIn(0.dp, (maxWidth - menuWidth).coerceAtLeast(0.dp))
@@ -196,6 +198,9 @@ internal fun CustomSelectionOverlay(
                         }
                         IconButton(onClick = onAnnotate) {
                             Icon(Icons.AutoMirrored.Filled.Message, "批注", tint = MaterialTheme.colorScheme.onSurface)
+                        }
+                        IconButton(onClick = onDictionary) {
+                            Icon(Icons.AutoMirrored.Filled.MenuBook, "词典", tint = MaterialTheme.colorScheme.onSurface)
                         }
                     }
                 }

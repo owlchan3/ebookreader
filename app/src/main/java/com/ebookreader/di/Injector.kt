@@ -1,6 +1,7 @@
 package com.ebookreader.di
 
 import android.content.Context
+import com.ebookreader.data.dictionary.DictionaryService
 import com.ebookreader.data.local.AppDatabase
 import com.ebookreader.data.network.ApiKeyManager
 import com.ebookreader.data.network.CloudTtsClient
@@ -26,6 +27,7 @@ object Injector {
     private var apiKeyManager: ApiKeyManager? = null
     private var deepSeekClient: DeepSeekClient? = null
     private var cloudTtsClient: CloudTtsClient? = null
+    private var dictionaryService: DictionaryService? = null
 
     fun init(context: Context) {
         database = AppDatabase.getInstance(context)
@@ -37,6 +39,7 @@ object Injector {
         deepSeekClient = DeepSeekClient(apiKeyManager!!)
         cloudTtsClient = CloudTtsClient(apiKeyManager!!)
         chatRepository = ChatRepositoryImpl(database!!.chatDao(), database!!.bookChunkDao(), context)
+        dictionaryService = DictionaryService(context)
     }
 
     fun bookRepository(): BookRepository = bookRepository
@@ -64,5 +67,8 @@ object Injector {
         ?: throw IllegalStateException("Injector not initialized. Call Injector.init(context) first.")
 
     fun appDatabase(): AppDatabase = database
+        ?: throw IllegalStateException("Injector not initialized. Call Injector.init(context) first.")
+
+    fun dictionaryService(): DictionaryService = dictionaryService
         ?: throw IllegalStateException("Injector not initialized. Call Injector.init(context) first.")
 }

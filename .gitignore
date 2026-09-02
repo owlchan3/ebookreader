@@ -15,3 +15,6 @@ keystore.properties
 keystore/
 *.jks
 *.keystore
+
+# Offline dictionary data (large, not committed — see README「离线词典数据」)
+app/src/main/assets/dictionaries/

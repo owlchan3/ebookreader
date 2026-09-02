@@ -119,6 +119,7 @@ import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ebookreader.domain.model.AnnotationStyle
+import com.ebookreader.domain.model.LookupState
 import com.ebookreader.ui.common.VerticalScrollbar
 import com.ebookreader.ui.common.computeScrollFraction
 import com.ebookreader.ui.common.fractionToScrollPosition
@@ -179,6 +180,7 @@ fun ReaderScreen(
     val annotations by viewModel.annotations.collectAsState()
     val pendingHighlight by viewModel.pendingHighlight.collectAsState()
     val pendingAnnotation by viewModel.pendingAnnotation.collectAsState()
+    val lookupState by viewModel.lookupState.collectAsState()
     val pageLabel by viewModel.currentPageLabel.collectAsState()
     val currentPageIndex by viewModel.currentPageIndex.collectAsState()
     val totalPages by viewModel.totalPages.collectAsState()
@@ -520,6 +522,16 @@ fun ReaderScreen(
                                         controller?.clearSelection()
                                     }
                                 },
+                                onDictionary = {
+                                    scope.launch {
+                                        val live = controller?.currentSelection()?.text
+                                        val text = listOfNotNull(live, selectedText).firstOrNull { it.isNotBlank() }
+                                        controller?.clearSelection()
+                                        if (!text.isNullOrBlank()) {
+                                            viewModel.onLookupRequested(text)
+                                        }
+                                    }
+                                },
                                 onDismiss = {
                                     controller?.clearSelection()
                                     customSelectionRect = null
@@ -823,7 +835,7 @@ fun ReaderScreen(
                 }
                 Spacer(Modifier.height(8.dp))
                 if (bookmarks.isEmpty()) {
-                    Text("暂无书签。添加书签后可在此记录页批注。",
+                    Text("暂无书签。添加书签后可在此记录笔记。",
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                 } else {
                     LazyColumn(Modifier.height(400.dp)) {
@@ -863,7 +875,7 @@ fun ReaderScreen(
                                         OutlinedTextField(
                                             value = editingNote,
                                             onValueChange = { editingNote = it },
-                                            label = { Text("页批注") },
+                                            label = { Text("笔记") },
                                             modifier = Modifier.fillMaxWidth(),
                                             minLines = 2,
                                         )
@@ -884,7 +896,7 @@ fun ReaderScreen(
                                         TextButton(onClick = {
                                             editingBookmarkId = bm.id
                                             editingNote = bm.note
-                                        }) { Text(if (bm.note.isEmpty()) "添加批注" else "编辑批注", fontSize = 12.sp) }
+                                        }) { Text(if (bm.note.isEmpty()) "添加笔记" else "编辑笔记", fontSize = 12.sp) }
                                     }
                                 }
                             }
@@ -962,6 +974,62 @@ fun ReaderScreen(
         }
     }
 
+    // 词典查询结果
+    val lookup = lookupState
+    when (lookup) {
+        LookupState.Idle -> {}
+        LookupState.Loading -> {
+            val dictSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            ModalBottomSheet(onDismissRequest = { viewModel.dismissLookup() }, sheetState = dictSheetState) {
+                Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            }
+        }
+        is LookupState.Success -> {
+            val dictSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            ModalBottomSheet(onDismissRequest = { viewModel.dismissLookup() }, sheetState = dictSheetState) {
+                val entry = lookup.entry
+                Column(Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
+                    Text(entry.word, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    if (!entry.phonetic.isNullOrBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(entry.phonetic, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    entry.definitions.forEach { d ->
+                        val typeLabel = d.type?.takeIf { it.isNotBlank() }?.let { "【$it】" } ?: ""
+                        Text("• $typeLabel${d.definition}", style = MaterialTheme.typography.bodyMedium)
+                        d.examples.forEach { ex ->
+                            Spacer(Modifier.height(2.dp))
+                            Text(ex, modifier = Modifier.padding(start = 12.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    if (!entry.note.isNullOrBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(entry.note, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text("来源：${entry.source}", fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                }
+            }
+        }
+        is LookupState.Error -> {
+            val dictSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            ModalBottomSheet(onDismissRequest = { viewModel.dismissLookup() }, sheetState = dictSheetState) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(lookup.message, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+    }
+
     // Annotations list sheet（批注 = 有笔记，划线 = 无笔记）
     if (showAnnotationsSheet) {
         var editingAnnotationId by remember { mutableStateOf<Long?>(null) }
@@ -1000,7 +1068,7 @@ fun ReaderScreen(
 
                 if (annotationTab == 0) {
                     if (noteAnnotations.isEmpty()) {
-                        Text("暂无批注。滚动模式下选中文字后点「批注」即可添加。",
+                        Text("暂无批注。选中文字后点「批注」即可添加。",
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                     } else {
                         LazyColumn(Modifier.height(400.dp)) {
@@ -1103,7 +1171,7 @@ fun ReaderScreen(
                     }
                 } else {
                     if (highlightAnnotations.isEmpty()) {
-                        Text("暂无划线。滚动模式下选中文字后点「划线」即可添加。",
+                        Text("暂无划线。选中文字后点「划线」即可添加。",
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                     } else {
                         LazyColumn(Modifier.height(400.dp)) {

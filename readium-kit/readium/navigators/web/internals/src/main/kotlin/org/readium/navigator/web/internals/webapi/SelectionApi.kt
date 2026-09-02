@@ -65,6 +65,48 @@ public class ReflowableSelectionApi(
                     window.__selStartRect = null;
                     window.__selEndRect = null;
 
+                    // 统一「吸附修正」：caretRangeFromPoint 会把靠近行末/留白的触点吸附到相邻行或
+                    // 远处文字。若命中的 caret 行与触点不在同一行（垂直越界），左右试探取回同行的
+                    // caret；整行无文字（页边距/段间距/空白）则放弃，避免「选中下一行第一个字」。
+                    if (r && r.startContainer) {
+                        var rect0 = null;
+                        try { rect0 = r.getBoundingClientRect(); } catch(e) {}
+                        if (rect0 && rect0.height > 0) {
+                            if (y < rect0.top || y > rect0.bottom) {
+                                var fixed = null;
+                                for (var s1 = -4; s1 >= -48 && !fixed; s1 -= 4) {
+                                    var q1 = null;
+                                    try { q1 = document.caretRangeFromPoint(x + s1, y); } catch(e) {}
+                                    if (!q1 || !q1.startContainer) continue;
+                                    var q1Rect = null;
+                                    try { q1Rect = q1.getBoundingClientRect(); } catch(e) {}
+                                    if (q1Rect && q1Rect.height > 0 && q1Rect.top <= y && y <= q1Rect.bottom) { fixed = q1; }
+                                }
+                                if (!fixed) {
+                                    for (var s2 = 4; s2 <= 48 && !fixed; s2 += 4) {
+                                        var q2 = null;
+                                        try { q2 = document.caretRangeFromPoint(x + s2, y); } catch(e) {}
+                                        if (!q2 || !q2.startContainer) continue;
+                                        var q2Rect = null;
+                                        try { q2Rect = q2.getBoundingClientRect(); } catch(e) {}
+                                        if (q2Rect && q2Rect.height > 0 && q2Rect.top <= y && y <= q2Rect.bottom) { fixed = q2; }
+                                    }
+                                }
+                                if (fixed) { r = fixed; }
+                                else { r = null; }   // 触点整行无文字：垂直留白，放弃选择
+                            }
+                            if (r) {
+                                // 水平留白：触点横向偏离文字中心过远（左右页边距），放弃选择
+                                var rect1 = null;
+                                try { rect1 = r.getBoundingClientRect(); } catch(e) {}
+                                if (rect1 && rect1.height > 0) {
+                                    var cx = (rect1.left + rect1.right) / 2;
+                                    if (Math.abs(x - cx) > rect1.height * 1.2) { r = null; }
+                                }
+                            }
+                        }
+                    }
+
                     var parent = 'null';
                     var word = '';
                     if (r && r.startContainer) {
@@ -100,10 +142,60 @@ public class ReflowableSelectionApi(
                                 return [k, k + 1];
                             };
 
+                            // 返回 o 左侧最近的 grapheme 范围 [s,e)（end <= o 的最后一个字）
+                            var graphemeBefore = function(o) {
+                                try {
+                                    var gs2 = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+                                    var gi2 = gs2.segment(nodeTxt), gc2 = gi2.next(), prev = null;
+                                    while (!gc2.done) {
+                                        var ga2 = gc2.value.index, gb2 = ga2 + gc2.value.segment.length;
+                                        if (gb2 > o) break;
+                                        prev = [ga2, gb2];
+                                        gc2 = gi2.next();
+                                    }
+                                    if (prev) return prev;
+                                } catch (e) {}
+                                var k2 = Math.max(0, Math.min(o - 1, nodeTxt.length - 1));
+                                return [k2, k2 + 1];
+                            };
+
+                            // 点 (px,py) 到矩形 r 的距离平方（比较用）
+                            var distToRect = function(px, py, r) {
+                                if (!r) return null;
+                                var dx = 0, dy = 0;
+                                if (px < r.left) dx = r.left - px;
+                                else if (px > r.right) dx = px - r.right;
+                                if (py < r.top) dy = r.top - py;
+                                else if (py > r.bottom) dy = py - r.bottom;
+                                return dx * dx + dy * dy;
+                            };
+
                             if (cjkRe.test(ch)) {
-                                // 中文等：只选单个字，避免 word 粒度把整句聚成一个跨行的词
-                                var g1 = graphemeRange(offset);
-                                start = g1[0]; end = g1[1];
+                                // 中文等：只选单个字。caret 是字符边界：长按行末最后一字右边缘时，
+                                // caret 落在该字之后（即下一行首字之前，同一文本节点），照 offset 向右
+                                // 选会误选下一行首字。改用「左右候选字的几何距离」判断，不依赖换行点
+                                // caret 矩形（其 left 在换行点可能跳到下一行首）。
+                                var zoomNow = (document.body.currentCSSZoom || 1);
+                                var gRight = graphemeRange(offset);
+                                var gLeft = graphemeBefore(offset);
+                                var px = x / zoomNow, py = y / zoomNow;
+                                var distL = null, distR = null;
+                                try {
+                                    var rl = document.createRange();
+                                    rl.setStart(sc, gLeft[0]); rl.setEnd(sc, gLeft[1]);
+                                    distL = distToRect(px, py, rl.getBoundingClientRect());
+                                } catch(e) {}
+                                try {
+                                    var rr = document.createRange();
+                                    rr.setStart(sc, gRight[0]); rr.setEnd(sc, gRight[1]);
+                                    distR = distToRect(px, py, rr.getBoundingClientRect());
+                                } catch(e) {}
+                                var pickL = (distL !== null && distR !== null && distL <= distR);
+                                if (pickL) {
+                                    start = gLeft[0]; end = gLeft[1];
+                                } else {
+                                    start = gRight[0]; end = gRight[1];
+                                }
                             } else if (wordRe.test(ch)) {
                                 // 拉丁字母/数字：选完整单词
                                 while (start > 0 && wordRe.test(nodeTxt.charAt(start - 1))) start--;
@@ -331,6 +423,56 @@ public class ReflowableSelectionApi(
                     var pr = null;
                     try { pr = document.caretRangeFromPoint(x, y); } catch(e) {}
                     if (!pr || !pr.startContainer) return null;
+
+                    // 留白钳制：拖到留白/段间距时，caretRangeFromPoint 可能吸附到相邻行、远处文字，
+                    // 甚至返回元素节点（不可用于 makeRange）。此时左右试探回到触点同一行的文本 caret；
+                    // 整行无文本（留白/段间距/页边距）则放弃本次移动，避免选区膨胀到整页。
+                    if (pr && pr.startContainer) {
+                        var prRect = null;
+                        try { prRect = pr.getBoundingClientRect(); } catch(e) {}
+                        // 水平留白：触点横向偏离最近字符过远（左右页边距），放弃本次移动，避免跳选到远处字符
+                        if (prRect && prRect.height > 0) {
+                            var prCx = (prRect.left + prRect.right) / 2;
+                            if (Math.abs(x - prCx) > prRect.height * 1.2) return null;
+                        }
+                        var needFix = (pr.startContainer.nodeType !== 3);
+                        var clamped = null;
+                        if (!needFix && prRect && prRect.height > 0) {
+                            needFix = (y < prRect.top || y > prRect.bottom);
+                        }
+                        if (needFix) {
+                            for (var dLeft = -4; dLeft >= -48 && !clamped; dLeft -= 4) {
+                                var ql = null;
+                                try { ql = document.caretRangeFromPoint(x + dLeft, y); } catch(e) {}
+                                if (!ql || !ql.startContainer || ql.startContainer.nodeType !== 3) continue;
+                                var qlRect = null;
+                                try { qlRect = ql.getBoundingClientRect(); } catch(e) {}
+                                if (qlRect && qlRect.height > 0 && qlRect.top <= y && y <= qlRect.bottom) clamped = ql;
+                            }
+                            if (!clamped) {
+                                for (var dRight = 4; dRight <= 48 && !clamped; dRight += 4) {
+                                    var qr2 = null;
+                                    try { qr2 = document.caretRangeFromPoint(x + dRight, y); } catch(e) {}
+                                    if (!qr2 || !qr2.startContainer || qr2.startContainer.nodeType !== 3) continue;
+                                    var qr2Rect = null;
+                                    try { qr2Rect = qr2.getBoundingClientRect(); } catch(e) {}
+                                    if (qr2Rect && qr2Rect.height > 0 && qr2Rect.top <= y && y <= qr2Rect.bottom) { clamped = qr2; break; }
+                                }
+                            }
+                            if (clamped) { pr = clamped; }
+                            else if (pr.startContainer.nodeType === 3 && prRect && prRect.height > 0) {
+                                // 文本节点且与触点垂直间距小（相邻行细缝）→ 保留相邻行吸附；
+                                // 间距大（大片留白/页边距）→ 放弃本次移动。
+                                var gapV = 0;
+                                if (y < prRect.top) gapV = prRect.top - y;
+                                else gapV = y - prRect.bottom;
+                                if (gapV > prRect.height * 1.5) return null;
+                            }
+                            else {
+                                return null;   // 元素节点或无效位置：放弃，避免选区膨胀
+                            }
+                        }
+                    }
 
                     // Keep the two logical handle endpoints in window globals so dragging one handle
                     // past the other swaps them (selecting the text in between) instead of collapsing
