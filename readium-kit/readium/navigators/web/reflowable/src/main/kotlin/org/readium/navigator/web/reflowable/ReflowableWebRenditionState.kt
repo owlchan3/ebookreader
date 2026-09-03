@@ -33,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.readium.navigator.common.DecorationController
 import org.readium.navigator.common.HtmlId
 import org.readium.navigator.common.NavigationController
@@ -483,17 +484,23 @@ internal class ReflowableNavigationDelegate(
                     try {
                         pagerState.scrollToPage(destIndex)
 
-                        suspendCancellableCoroutine { continuation ->
-                            continuation.invokeOnCancellation {
-                                cleanUp()
-                            }
-                            resourceStates.zip(resourceLocations)
-                                .forEach { (state, location) ->
-                                    state.go(
-                                        location = location,
-                                        continuation = continuation.takeIf { state === resourceStates[destIndex] }
-                                    )
+                        // 导航超时兜底：目标章节 WebView 若迟迟不回调「加载完成」（如新导入书末章），
+                        // suspendCancellableCoroutine 永不返回、navigatorMutex 被永久占用，导致后续翻页全部失效。
+                        // 超时后取消等待（cleanUp 会清理 pending 并释放 mutex），用户仍停留在已滚动的目标页，
+                        // 且可通过 moveForward/moveBackward 回退到相邻章节脱离卡死。
+                        withTimeoutOrNull(5000L) {
+                            suspendCancellableCoroutine { continuation ->
+                                continuation.invokeOnCancellation {
+                                    cleanUp()
                                 }
+                                resourceStates.zip(resourceLocations)
+                                    .forEach { (state, location) ->
+                                        state.go(
+                                            location = location,
+                                            continuation = continuation.takeIf { state === resourceStates[destIndex] }
+                                        )
+                                    }
+                            }
                         }
                     } catch (e: Exception) { // Mainly for CancellationException
                         cleanUp()
@@ -526,11 +533,12 @@ internal class ReflowableNavigationDelegate(
         coroutineScope {
             navigatorMutex.tryMutate {
                 val currentResourceState = resourceStates[pagerState.currentPage]
-                val scrollController =
-                    currentResourceState.scrollController.value ?: return@tryMutate
-                if (scrollController.canMoveForward()) {
+                val scrollController = currentResourceState.scrollController.value
+                if (scrollController != null && scrollController.canMoveForward()) {
                     scrollController.moveForward()
                 } else if (pagerState.currentPage < publication.readingOrder.items.size - 1) {
+                    // scrollController 为空（当前章节资源尚未就绪）时仍允许跳到下一章，
+                    // 避免跳转后翻页被永久禁用。
                     pagerState.scrollToPage(pagerState.currentPage + 1)
                 }
             }
@@ -541,11 +549,12 @@ internal class ReflowableNavigationDelegate(
         coroutineScope {
             navigatorMutex.tryMutate {
                 val currentResourceState = resourceStates[pagerState.currentPage]
-                val scrollController =
-                    currentResourceState.scrollController.value ?: return@tryMutate
-                if (scrollController.canMoveBackward()) {
+                val scrollController = currentResourceState.scrollController.value
+                if (scrollController != null && scrollController.canMoveBackward()) {
                     scrollController.moveBackward()
                 } else if (pagerState.currentPage > 0) {
+                    // scrollController 为空（当前章节资源尚未就绪）时仍允许跳到上一章，
+                    // 避免跳转后翻页被永久禁用。
                     pagerState.scrollToPage(pagerState.currentPage - 1)
                 }
             }

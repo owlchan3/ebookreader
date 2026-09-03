@@ -880,10 +880,10 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                     val loc = Locator.fromJSON(jsonObj)
                     if (loc != null) {
                         viewModelScope.launch {
-                            ctrl.goTo(ReflowableWebGoLocation(
-                                href = loc.href,
-                                progression = loc.locations.progression?.let { Progression(it) }
-                            ))
+                            // 用完整 locator 构造跳转目标：搜索结果的 locator 带有 text（命中词+前后文），
+                            // 会转为 textAnchor 并被导航器优先使用（textAnchor > cssSelector > htmlId > progression），
+                            // 精确定位命中文字；书签 locator 无 text.highlight，toTextAnchor() 返回 null，回退到 progression。
+                            ctrl.goTo(ReflowableWebGoLocation(locator = loc))
                         }
                     }
                 } catch (_: Exception) {}

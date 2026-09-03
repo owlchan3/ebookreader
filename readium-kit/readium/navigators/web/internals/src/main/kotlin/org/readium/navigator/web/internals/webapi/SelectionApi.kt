@@ -61,9 +61,10 @@ public class ReflowableSelectionApi(
                     }
                     var r = null;
                     try { r = document.caretRangeFromPoint(x, y); } catch(e) {}
-                    // 重置两个手柄的矩形缓存，避免残留上一次选区的旧值。
+                    // 重置两个手柄的矩形缓存与留白标记，避免残留上一次选区的旧值。
                     window.__selStartRect = null;
                     window.__selEndRect = null;
+                    window.__selBlank = false;
 
                     // 统一「吸附修正」：caretRangeFromPoint 会把靠近行末/留白的触点吸附到相邻行或
                     // 远处文字。若命中的 caret 行与触点不在同一行（垂直越界），左右试探取回同行的
@@ -425,54 +426,72 @@ public class ReflowableSelectionApi(
                     if (!pr || !pr.startContainer) return null;
 
                     // 留白钳制：拖到留白/段间距时，caretRangeFromPoint 可能吸附到相邻行、远处文字，
-                    // 甚至返回元素节点（不可用于 makeRange）。此时左右试探回到触点同一行的文本 caret；
-                    // 整行无文本（留白/段间距/页边距）则放弃本次移动，避免选区膨胀到整页。
+                    // 甚至返回元素节点（不可用于 makeRange）。处理策略：
+                    //   1) 触点位于最近字符上方/下方（末行之后/首行之前）→ 直接钳制到该字符，
+                    //      让选区向拖动方向扩展、覆盖两个手柄之间的文字（而不是冻结手柄）。
+                    //   2) 同行（或无效位置）→ 左右试探回到同一行的文本 caret；整行无文本则放弃。
+                    // 所有钳制目标都须落在当前可视页内（[0, vpW]），防止吸附到相邻页/栏的文字。
                     if (pr && pr.startContainer) {
                         var prRect = null;
                         try { prRect = pr.getBoundingClientRect(); } catch(e) {}
-                        // 水平留白：触点横向偏离最近字符过远（左右页边距），放弃本次移动，避免跳选到远处字符
-                        if (prRect && prRect.height > 0) {
-                            var prCx = (prRect.left + prRect.right) / 2;
-                            if (Math.abs(x - prCx) > prRect.height * 1.2) return null;
-                        }
-                        var needFix = (pr.startContainer.nodeType !== 3);
-                        var clamped = null;
-                        if (!needFix && prRect && prRect.height > 0) {
-                            needFix = (y < prRect.top || y > prRect.bottom);
-                        }
-                        if (needFix) {
-                            for (var dLeft = -4; dLeft >= -48 && !clamped; dLeft -= 4) {
-                                var ql = null;
-                                try { ql = document.caretRangeFromPoint(x + dLeft, y); } catch(e) {}
-                                if (!ql || !ql.startContainer || ql.startContainer.nodeType !== 3) continue;
-                                var qlRect = null;
-                                try { qlRect = ql.getBoundingClientRect(); } catch(e) {}
-                                if (qlRect && qlRect.height > 0 && qlRect.top <= y && y <= qlRect.bottom) clamped = ql;
+                        var vpW = (document.documentElement.clientWidth || window.innerWidth || 400);
+                        var prIsText = (pr.startContainer.nodeType === 3);
+                        var prInViewport = prIsText && prRect && prRect.height > 0 && prRect.left >= 0 && prRect.right <= vpW;
+                        var belowLine = prInViewport && (y > prRect.bottom);
+                        var aboveLine = prInViewport && (y < prRect.top);
+
+                        if (!(belowLine || aboveLine)) {
+                            // 水平留白：触点横向偏离最近字符过远（左右页边距），放弃本次移动，避免跳选到远处字符。
+                            // 带迟滞：一旦判定进入留白（window.__selBlank），需更贴近文字才解除，避免在阈值附近抖动（闪烁）。
+                            var wasBlank = !!window.__selBlank;
+                            if (prRect && prRect.height > 0) {
+                                var prCx = (prRect.left + prRect.right) / 2;
+                                var hGap = Math.abs(x - prCx);
+                                var hThr = prRect.height * (wasBlank ? 0.35 : 0.6);
+                                if (hGap > hThr) { window.__selBlank = true; return null; }
                             }
-                            if (!clamped) {
-                                for (var dRight = 4; dRight <= 48 && !clamped; dRight += 4) {
-                                    var qr2 = null;
-                                    try { qr2 = document.caretRangeFromPoint(x + dRight, y); } catch(e) {}
-                                    if (!qr2 || !qr2.startContainer || qr2.startContainer.nodeType !== 3) continue;
-                                    var qr2Rect = null;
-                                    try { qr2Rect = qr2.getBoundingClientRect(); } catch(e) {}
-                                    if (qr2Rect && qr2Rect.height > 0 && qr2Rect.top <= y && y <= qr2Rect.bottom) { clamped = qr2; break; }
+                            var needFix = !prIsText;
+                            var clamped = null;
+                            if (!needFix && prRect && prRect.height > 0) {
+                                needFix = (y < prRect.top || y > prRect.bottom);
+                            }
+                            if (needFix) {
+                                // 同行文字探测范围需覆盖整栏文字宽度。短句独立成段时短句只占左侧，
+                                // 触点落在其右侧留白、而 caretRangeFromPoint 又吸附到上方长句（横向对齐、纵向更近）时，
+                                // 只有把探测范围放远，才能找到触点同一行的短句文字并正确钳制，避免选区粘滞后跳变（异常扩大/闪烁）。
+                                // 探测限定在当前可视页内（[0, vpW]），防止吸附到相邻栏（上/下一页）的文字。
+                                for (var dLeft = -4; (x + dLeft) >= 0 && !clamped; dLeft -= 4) {
+                                    var ql = null;
+                                    try { ql = document.caretRangeFromPoint(x + dLeft, y); } catch(e) {}
+                                    if (!ql || !ql.startContainer || ql.startContainer.nodeType !== 3) continue;
+                                    var qlRect = null;
+                                    try { qlRect = ql.getBoundingClientRect(); } catch(e) {}
+                                    if (qlRect && qlRect.height > 0 && qlRect.top <= y && y <= qlRect.bottom
+                                        && qlRect.left >= 0 && qlRect.right <= vpW) clamped = ql;
                                 }
-                            }
-                            if (clamped) { pr = clamped; }
-                            else if (pr.startContainer.nodeType === 3 && prRect && prRect.height > 0) {
-                                // 文本节点且与触点垂直间距小（相邻行细缝）→ 保留相邻行吸附；
-                                // 间距大（大片留白/页边距）→ 放弃本次移动。
-                                var gapV = 0;
-                                if (y < prRect.top) gapV = prRect.top - y;
-                                else gapV = y - prRect.bottom;
-                                if (gapV > prRect.height * 1.5) return null;
-                            }
-                            else {
-                                return null;   // 元素节点或无效位置：放弃，避免选区膨胀
+                                if (!clamped) {
+                                    for (var dRight = 4; (x + dRight) <= vpW && !clamped; dRight += 4) {
+                                        var qr2 = null;
+                                        try { qr2 = document.caretRangeFromPoint(x + dRight, y); } catch(e) {}
+                                        if (!qr2 || !qr2.startContainer || qr2.startContainer.nodeType !== 3) continue;
+                                        var qr2Rect = null;
+                                        try { qr2Rect = qr2.getBoundingClientRect(); } catch(e) {}
+                                        if (qr2Rect && qr2Rect.height > 0 && qr2Rect.top <= y && y <= qr2Rect.bottom
+                                            && qr2Rect.left >= 0 && qr2Rect.right <= vpW) { clamped = qr2; break; }
+                                    }
+                                }
+                                if (clamped) {
+                                    pr = clamped;
+                                } else {
+                                    // 无同行文本（元素节点或整行留白）→ 放弃，避免选区膨胀。
+                                    window.__selBlank = true;
+                                    return null;
+                                }
                             }
                         }
                     }
+                    // 通过全部留白检查：清除留白标记。
+                    window.__selBlank = false;
 
                     // Keep the two logical handle endpoints in window globals so dragging one handle
                     // past the other swaps them (selecting the text in between) instead of collapsing

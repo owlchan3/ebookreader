@@ -78,6 +78,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ModalBottomSheetProperties
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -821,10 +822,16 @@ fun ReaderScreen(
         var editingBookmarkId by remember { mutableStateOf<Long?>(null) }
         var editingNote by remember { mutableStateOf("") }
 
-        ModalBottomSheet(onDismissRequest = {
-            showBookmarksSheet = false
-            editingBookmarkId = null
-        }) {
+        ModalBottomSheet(
+            onDismissRequest = {
+                showBookmarksSheet = false
+                editingBookmarkId = null
+            },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            sheetGesturesEnabled = false,
+            dragHandle = null,
+            properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false),
+        ) {
             Column(Modifier.padding(16.dp)) {
                 Row(Modifier.fillMaxWidth()) {
                     Text("书签", fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -1037,14 +1044,22 @@ fun ReaderScreen(
         var editingStyle by remember { mutableStateOf(AnnotationStyle.HIGHLIGHT) }
         var editingColor by remember { mutableStateOf(highlightColors.first()) }
         var annotationTab by remember { mutableStateOf(0) }
+        val noteListState = rememberLazyListState()
+        val highlightListState = rememberLazyListState()
 
         val noteAnnotations = annotations.filter { it.note.isNotEmpty() }
         val highlightAnnotations = annotations.filter { it.note.isEmpty() }
 
-        ModalBottomSheet(onDismissRequest = {
-            showAnnotationsSheet = false
-            editingAnnotationId = null
-        }) {
+        ModalBottomSheet(
+            onDismissRequest = {
+                showAnnotationsSheet = false
+                editingAnnotationId = null
+            },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            sheetGesturesEnabled = false,
+            dragHandle = null,
+            properties = ModalBottomSheetProperties(shouldDismissOnBackPress = false),
+        ) {
             Column(Modifier.padding(16.dp)) {
                 Text("批注与划线", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
@@ -1071,102 +1086,133 @@ fun ReaderScreen(
                         Text("暂无批注。选中文字后点「批注」即可添加。",
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                     } else {
-                        LazyColumn(Modifier.height(400.dp)) {
-                            itemsIndexed(noteAnnotations) { _, ann ->
-                                Card(
-                                    Modifier.fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                        .clickable {
-                                            viewModel.goToPage(ann.pageIndex)
-                                            showAnnotationsSheet = false
-                                        },
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                                    )
-                                ) {
-                                    Column(Modifier.padding(12.dp)) {
-                                        Row(
-                                            Modifier.fillMaxWidth(),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Icon(Icons.Default.Create, null, Modifier.size(18.dp),
-                                                tint = MaterialTheme.colorScheme.primary)
-                                            Spacer(Modifier.width(10.dp))
-                                            Text(viewModel.annotationPageLabel(ann), Modifier.weight(1f),
-                                                style = MaterialTheme.typography.bodyMedium)
-                                            Text(formatTimestamp(ann.createdTimestamp), fontSize = 11.sp,
-                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
-                                            IconButton(onClick = { viewModel.removeAnnotation(ann.id) }) {
-                                                Icon(Icons.Default.Delete, "删除", Modifier.size(18.dp),
-                                                    tint = MaterialTheme.colorScheme.error)
-                                            }
-                                        }
-                                        Spacer(Modifier.height(6.dp))
-                                        // 原文：斜体 + 左侧竖条，与下方笔记明显区分
-                                        Row(
-                                            Modifier.fillMaxWidth().height(IntrinsicSize.Min),
-                                            verticalAlignment = Alignment.Top
-                                        ) {
-                                            Box(Modifier
-                                                .width(3.dp)
-                                                .fillMaxHeight()
-                                                .background(MaterialTheme.colorScheme.primary))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text(ann.selectedText,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                fontStyle = FontStyle.Italic,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                maxLines = 2, overflow = TextOverflow.Ellipsis)
-                                        }
-
-                                        if (editingAnnotationId == ann.id) {
-                                            Spacer(Modifier.height(6.dp))
-                                            OutlinedTextField(
-                                                value = editingNote,
-                                                onValueChange = { editingNote = it },
-                                                label = { Text("笔记") },
-                                                modifier = Modifier.fillMaxWidth(),
-                                                minLines = 2,
-                                            )
-                                            Spacer(Modifier.height(8.dp))
-                                            HighlightStyleSelector(editingStyle) { editingStyle = it }
-                                            ColorSelector(editingColor) { editingColor = it }
-                                            Spacer(Modifier.height(4.dp))
-                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                                                TextButton(onClick = {
-                                                    viewModel.editAnnotation(ann.id, editingNote, editingStyle, editingColor)
-                                                    editingAnnotationId = null
-                                                }) { Text("保存") }
-                                                TextButton(onClick = { editingAnnotationId = null }) { Text("取消") }
-                                            }
-                                        } else {
-                                            Spacer(Modifier.height(8.dp))
-                                            // 笔记：带底色圆角框 + 「笔记」小标题，明显区别于原文
-                                            Box(Modifier
-                                                .fillMaxWidth()
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
-                                                .padding(10.dp)
+                        Box(Modifier.height(400.dp)) {
+                            LazyColumn(Modifier.fillMaxSize(), state = noteListState) {
+                                itemsIndexed(noteAnnotations) { _, ann ->
+                                    Card(
+                                        Modifier.fillMaxWidth()
+                                            .padding(vertical = 4.dp)
+                                            .clickable {
+                                                viewModel.goToPage(ann.pageIndex)
+                                                showAnnotationsSheet = false
+                                            },
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                        )
+                                    ) {
+                                        Column(Modifier.padding(12.dp)) {
+                                            Row(
+                                                Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically
                                             ) {
-                                                Column {
-                                                    Text("笔记", fontSize = 11.sp, fontWeight = FontWeight.Bold,
-                                                        color = MaterialTheme.colorScheme.primary)
-                                                    Spacer(Modifier.height(2.dp))
-                                                    Text(ann.note, style = MaterialTheme.typography.bodySmall,
-                                                        color = MaterialTheme.colorScheme.onSurface)
+                                                Icon(Icons.Default.Create, null, Modifier.size(18.dp),
+                                                    tint = MaterialTheme.colorScheme.primary)
+                                                Spacer(Modifier.width(10.dp))
+                                                Text(viewModel.annotationPageLabel(ann), Modifier.weight(1f),
+                                                    style = MaterialTheme.typography.bodyMedium)
+                                                Text(formatTimestamp(ann.createdTimestamp), fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                                                IconButton(onClick = { viewModel.removeAnnotation(ann.id) }) {
+                                                    Icon(Icons.Default.Delete, "删除", Modifier.size(18.dp),
+                                                        tint = MaterialTheme.colorScheme.error)
                                                 }
                                             }
-                                            Spacer(Modifier.height(2.dp))
-                                            TextButton(onClick = {
-                                                editingAnnotationId = ann.id
-                                                editingNote = ann.note
-                                                editingStyle = ann.style
-                                                editingColor = ann.color
-                                            }) { Text("编辑笔记", fontSize = 12.sp) }
+                                            Spacer(Modifier.height(6.dp))
+                                            // 原文：斜体 + 左侧竖条，与下方笔记明显区分
+                                            Row(
+                                                Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+                                                verticalAlignment = Alignment.Top
+                                            ) {
+                                                Box(Modifier
+                                                    .width(3.dp)
+                                                    .fillMaxHeight()
+                                                    .background(MaterialTheme.colorScheme.primary))
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(ann.selectedText,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    fontStyle = FontStyle.Italic,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                            }
+
+                                            if (editingAnnotationId == ann.id) {
+                                                Spacer(Modifier.height(6.dp))
+                                                OutlinedTextField(
+                                                    value = editingNote,
+                                                    onValueChange = { editingNote = it },
+                                                    label = { Text("笔记") },
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    minLines = 2,
+                                                )
+                                                Spacer(Modifier.height(8.dp))
+                                                HighlightStyleSelector(editingStyle) { editingStyle = it }
+                                                ColorSelector(editingColor) { editingColor = it }
+                                                Spacer(Modifier.height(4.dp))
+                                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                                    TextButton(onClick = {
+                                                        viewModel.editAnnotation(ann.id, editingNote, editingStyle, editingColor)
+                                                        editingAnnotationId = null
+                                                    }) { Text("保存") }
+                                                    TextButton(onClick = { editingAnnotationId = null }) { Text("取消") }
+                                                }
+                                            } else {
+                                                Spacer(Modifier.height(8.dp))
+                                                // 笔记：带底色圆角框 + 「笔记」小标题，明显区别于原文
+                                                Box(Modifier
+                                                    .fillMaxWidth()
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.08f))
+                                                    .padding(10.dp)
+                                                ) {
+                                                    Column {
+                                                        Text("笔记", fontSize = 11.sp, fontWeight = FontWeight.Bold,
+                                                            color = MaterialTheme.colorScheme.primary)
+                                                        Spacer(Modifier.height(2.dp))
+                                                        Text(ann.note, style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurface)
+                                                    }
+                                                }
+                                                Spacer(Modifier.height(2.dp))
+                                                TextButton(onClick = {
+                                                    editingAnnotationId = ann.id
+                                                    editingNote = ann.note
+                                                    editingStyle = ann.style
+                                                    editingColor = ann.color
+                                                }) { Text("编辑笔记", fontSize = 12.sp) }
+                                            }
                                         }
                                     }
                                 }
                             }
+                            val noteListInfo = noteListState.layoutInfo
+                            val noteVisibleItems = noteListInfo.visibleItemsInfo
+                            val noteAvgExtent = if (noteVisibleItems.isEmpty()) 0f
+                                else noteVisibleItems.map { it.size.toFloat() }.average().toFloat()
+                            val noteViewportExtent = (noteListInfo.viewportEndOffset - noteListInfo.viewportStartOffset).toFloat()
+                            val noteFraction = computeScrollFraction(
+                                firstVisibleIndex = noteListState.firstVisibleItemIndex,
+                                firstVisibleScrollOffset = noteListState.firstVisibleItemScrollOffset,
+                                itemExtent = noteAvgExtent,
+                                totalItems = noteListInfo.totalItemsCount,
+                                columns = 1,
+                                viewportExtent = noteViewportExtent,
+                            )
+                            VerticalScrollbar(
+                                fraction = noteFraction,
+                                onScrollFraction = { frac ->
+                                    val info = noteListState.layoutInfo
+                                    val visible = info.visibleItemsInfo
+                                    if (visible.isNotEmpty()) {
+                                        val avg = visible.map { it.size.toFloat() }.average().toFloat()
+                                        val scrollable = (avg * info.totalItemsCount - noteViewportExtent).coerceAtLeast(1f)
+                                        val target = frac * scrollable
+                                        val current = noteListState.firstVisibleItemIndex * avg + noteListState.firstVisibleItemScrollOffset
+                                        scope.launch { noteListState.scroll { scrollBy(target - current) } }
+                                    }
+                                },
+                                modifier = Modifier.align(Alignment.CenterEnd),
+                                canScroll = noteListState.canScrollForward || noteListState.canScrollBackward,
+                            )
                         }
                     }
                 } else {
@@ -1174,57 +1220,88 @@ fun ReaderScreen(
                         Text("暂无划线。选中文字后点「划线」即可添加。",
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
                     } else {
-                        LazyColumn(Modifier.height(400.dp)) {
-                            itemsIndexed(highlightAnnotations) { _, ann ->
-                                Card(
-                                    Modifier.fillMaxWidth()
-                                        .padding(vertical = 4.dp)
-                                        .clickable {
-                                            viewModel.goToPage(ann.pageIndex)
-                                            showAnnotationsSheet = false
-                                        },
-                                    colors = CardDefaults.cardColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceVariant
-                                    )
-                                ) {
-                                    Column(Modifier.padding(12.dp)) {
-                                        Row(
-                                            Modifier.fillMaxWidth(),
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                highlightStyleLabels.firstOrNull { it.first == ann.style }?.second ?: "高光",
-                                                fontSize = 11.sp,
-                                                color = MaterialTheme.colorScheme.primary,
-                                            )
-                                            Spacer(Modifier.width(8.dp))
-                                            Text(viewModel.annotationPageLabel(ann), Modifier.weight(1f),
-                                                style = MaterialTheme.typography.bodyMedium)
-                                            Text(formatTimestamp(ann.createdTimestamp), fontSize = 11.sp,
-                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
-                                            IconButton(onClick = { viewModel.removeAnnotation(ann.id) }) {
-                                                Icon(Icons.Default.Delete, "删除", Modifier.size(18.dp),
-                                                    tint = MaterialTheme.colorScheme.error)
+                        Box(Modifier.height(400.dp)) {
+                            LazyColumn(Modifier.fillMaxSize(), state = highlightListState) {
+                                itemsIndexed(highlightAnnotations) { _, ann ->
+                                    Card(
+                                        Modifier.fillMaxWidth()
+                                            .padding(vertical = 4.dp)
+                                            .clickable {
+                                                viewModel.goToPage(ann.pageIndex)
+                                                showAnnotationsSheet = false
+                                            },
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                                        )
+                                    ) {
+                                        Column(Modifier.padding(12.dp)) {
+                                            Row(
+                                                Modifier.fillMaxWidth(),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    highlightStyleLabels.firstOrNull { it.first == ann.style }?.second ?: "高光",
+                                                    fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                )
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(viewModel.annotationPageLabel(ann), Modifier.weight(1f),
+                                                    style = MaterialTheme.typography.bodyMedium)
+                                                Text(formatTimestamp(ann.createdTimestamp), fontSize = 11.sp,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                                                IconButton(onClick = { viewModel.removeAnnotation(ann.id) }) {
+                                                    Icon(Icons.Default.Delete, "删除", Modifier.size(18.dp),
+                                                        tint = MaterialTheme.colorScheme.error)
+                                                }
                                             }
-                                        }
-                                        Spacer(Modifier.height(6.dp))
-                                        Row(
-                                            Modifier.fillMaxWidth().height(IntrinsicSize.Min),
-                                            verticalAlignment = Alignment.Top
-                                        ) {
-                                            Box(Modifier
-                                                .width(3.dp)
-                                                .fillMaxHeight()
-                                                .background(Color(ann.color.toLong() and 0xFFFFFFFFL)))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text(ann.selectedText,
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
-                                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                            Spacer(Modifier.height(6.dp))
+                                            Row(
+                                                Modifier.fillMaxWidth().height(IntrinsicSize.Min),
+                                                verticalAlignment = Alignment.Top
+                                            ) {
+                                                Box(Modifier
+                                                    .width(3.dp)
+                                                    .fillMaxHeight()
+                                                    .background(Color(ann.color.toLong() and 0xFFFFFFFFL)))
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(ann.selectedText,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                            }
                                         }
                                     }
                                 }
                             }
+                            val highlightListInfo = highlightListState.layoutInfo
+                            val highlightVisibleItems = highlightListInfo.visibleItemsInfo
+                            val highlightAvgExtent = if (highlightVisibleItems.isEmpty()) 0f
+                                else highlightVisibleItems.map { it.size.toFloat() }.average().toFloat()
+                            val highlightViewportExtent = (highlightListInfo.viewportEndOffset - highlightListInfo.viewportStartOffset).toFloat()
+                            val highlightFraction = computeScrollFraction(
+                                firstVisibleIndex = highlightListState.firstVisibleItemIndex,
+                                firstVisibleScrollOffset = highlightListState.firstVisibleItemScrollOffset,
+                                itemExtent = highlightAvgExtent,
+                                totalItems = highlightListInfo.totalItemsCount,
+                                columns = 1,
+                                viewportExtent = highlightViewportExtent,
+                            )
+                            VerticalScrollbar(
+                                fraction = highlightFraction,
+                                onScrollFraction = { frac ->
+                                    val info = highlightListState.layoutInfo
+                                    val visible = info.visibleItemsInfo
+                                    if (visible.isNotEmpty()) {
+                                        val avg = visible.map { it.size.toFloat() }.average().toFloat()
+                                        val scrollable = (avg * info.totalItemsCount - highlightViewportExtent).coerceAtLeast(1f)
+                                        val target = frac * scrollable
+                                        val current = highlightListState.firstVisibleItemIndex * avg + highlightListState.firstVisibleItemScrollOffset
+                                        scope.launch { highlightListState.scroll { scrollBy(target - current) } }
+                                    }
+                                },
+                                modifier = Modifier.align(Alignment.CenterEnd),
+                                canScroll = highlightListState.canScrollForward || highlightListState.canScrollBackward,
+                            )
                         }
                     }
                 }
