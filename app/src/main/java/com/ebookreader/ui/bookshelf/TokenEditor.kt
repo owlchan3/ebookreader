@@ -143,7 +143,7 @@ fun TokenEditor(
                 singleLine = false,
                 minLines = 1,
                 maxLines = 4,
-                placeholder = { Text("搜索书名或作者") },
+                placeholder = { Text("搜索书名 / 作者 / 格式（空格多词）") },
                 leadingIcon = {
                     Icon(Icons.Default.Search, "搜索")
                 },

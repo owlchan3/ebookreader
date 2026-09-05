@@ -26,7 +26,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-enum class SortMode { RECENT, TITLE, AUTHOR, DATE_ADDED }
+enum class SortMode { RECENT, TITLE, AUTHOR, DATE_ADDED, FORMAT }
 enum class SearchMode { TEXT, TAG }
 enum class TagLogic { AND, OR }
 
@@ -124,11 +124,15 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
     val books: StateFlow<List<Book>> = combine(
         filteredBooksFlow, _searchQuery, _sortMode, _searchMode
     ) { list, query, sort, mode ->
-        // TEXT mode: filter by title/author; TAG mode: already filtered by tags
+        // TEXT mode: 按空白分词做多词 AND 搜索，逐词匹配书名/作者/格式；TAG mode: 已按标签过滤
         val filtered = if (mode == SearchMode.TEXT && query.isNotBlank()) {
-            list.filter {
-                it.title.contains(query, ignoreCase = true) ||
-                it.author.contains(query, ignoreCase = true)
+            val terms = query.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+            list.filter { book ->
+                terms.all { term ->
+                    book.title.contains(term, ignoreCase = true) ||
+                        book.author.contains(term, ignoreCase = true) ||
+                        book.format.contains(term, ignoreCase = true)
+                }
             }
         } else list
         when (sort) {
@@ -136,6 +140,7 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
             SortMode.TITLE -> filtered.sortedBy { it.title.lowercase() }
             SortMode.AUTHOR -> filtered.sortedBy { it.author.lowercase() }
             SortMode.DATE_ADDED -> filtered.sortedByDescending { it.addedTimestamp }
+            SortMode.FORMAT -> filtered.sortedWith(compareBy({ it.format.uppercase() }, { it.title.lowercase() }))
         }
     }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
@@ -574,6 +579,7 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
             var successCount = 0
             var failCount = 0
             var dupCount = 0
+            var firstError: String? = null
             val seenInBatch = mutableSetOf<String>()
             val resolver = getApplication<Application>().contentResolver
             val total = uris.size
@@ -595,7 +601,12 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
                         bookRepository.syncAutoRelationsForBook(newId)
                         successCount++
                     },
-                    onFailure = { failCount++ },
+                    onFailure = { e ->
+                        failCount++
+                        if (firstError == null) {
+                            firstError = e.message?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                        }
+                    },
                 )
             }
             _importProgress.value = null
@@ -609,6 +620,7 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
                 if (failCount > 0) {
                     if (successCount > 0 || dupCount > 0) append("，")
                     append("$failCount 本失败")
+                    if (firstError != null) append("：$firstError")
                 }
             }
             if (msg.isNotEmpty()) _batchOpMessage.value = msg

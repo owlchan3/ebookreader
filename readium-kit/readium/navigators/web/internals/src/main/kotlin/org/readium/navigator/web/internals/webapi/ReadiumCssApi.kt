@@ -10,7 +10,7 @@ public class ReadiumCssApi(
         val values = buildString {
             append("[")
             for ((k, v) in properties.entries) {
-                append("""["$k", "${v.orEmpty()}"],""")
+                append("""["${k.escapeJsString()}", "${v.orEmpty().escapeJsString()}"],""")
             }
             append("]")
         }
@@ -18,3 +18,7 @@ public class ReadiumCssApi(
         webView.evaluateJavascript(script) {}
     }
 }
+
+/** 转义 [String]，使其可安全嵌入 JS 字符串字面量（双引号 + 反斜杠）。 */
+private fun String.escapeJsString(): String =
+    replace("\\", "\\\\").replace("\"", "\\\"")

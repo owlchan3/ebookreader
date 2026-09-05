@@ -192,6 +192,12 @@ public class WebViewServer(
             "Accept-Ranges" to "bytes"
         )
 
+        // Injected HTML must never be cached: otherwise the WebView keeps serving a stale
+        // snapshot (e.g. with an older Readium CSS theme) across app updates.
+        if (mediaType?.isHtml == true) {
+            headers["Cache-Control"] = "no-store"
+        }
+
         val stream = resource.asInputStream()
         if (range == null) {
             return WebResourceResponse(

@@ -118,8 +118,11 @@ public class RelaxedWebView(context: Context) : WebView(context) {
  * has received data up-to-date at the moment when the call occurs or newer.
  */
 public fun RelaxedWebView.invokeOnWebViewUpToDate(block: WebView.() -> Unit) {
-    requestLayout()
+    // Register the listener BEFORE requesting layout: a synchronous layout pass (which can
+    // happen mid page-turn animation) would otherwise fire `onLayout` before the listener is
+    // installed, stranding the callback and leaving the placeholder up forever.
     setNextLayoutListener {
         invokeOnReadyToBeDrawn(block)
     }
+    requestLayout()
 }

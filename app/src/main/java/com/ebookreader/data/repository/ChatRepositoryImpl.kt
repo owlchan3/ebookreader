@@ -429,7 +429,7 @@ class ChatRepositoryImpl(
         // 与阅读器目录保持一致：复用 BookImporter 的章节检测（同一套正则 + 100 字过滤 + 去重），
         // 这样拆书使用的章节列表与书籍当前目录相同。
         val detected = try {
-            BookImporter(context).detectChapters(text)
+            BookImporter.detectChapters(text)
         } catch (_: Exception) {
             emptyList()
         }

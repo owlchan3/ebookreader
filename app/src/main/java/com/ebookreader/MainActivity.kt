@@ -3,6 +3,7 @@ package com.ebookreader
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -27,6 +28,7 @@ import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.ebookreader.di.Injector
+import kotlinx.coroutines.flow.MutableStateFlow
 import com.ebookreader.ui.navigation.AppNavGraph
 import com.ebookreader.ui.navigation.Screen
 import com.ebookreader.ui.navigation.bottomNavItems
@@ -37,6 +39,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         consumeDecomposeIntent(intent)
+        consumeImportIntent(intent)
         enableEdgeToEdge()
         setContent {
             EBookReaderTheme {
@@ -49,6 +52,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         consumeDecomposeIntent(intent)
+        consumeImportIntent(intent)
     }
 
     private fun consumeDecomposeIntent(intent: Intent?) {
@@ -59,9 +63,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun consumeImportIntent(intent: Intent?) {
+        val data = intent?.takeIf { it.action == Intent.ACTION_VIEW }?.data
+        if (data != null) importRequests.value = data
+    }
+
     companion object {
         @Volatile
         var pendingDecompose: Pair<Long, String>? = null
+
+        /** 「打开方式」传入的待导入文件 Uri（BookshelfScreen 消费后置 null）。 */
+        val importRequests = MutableStateFlow<Uri?>(null)
     }
 }
 

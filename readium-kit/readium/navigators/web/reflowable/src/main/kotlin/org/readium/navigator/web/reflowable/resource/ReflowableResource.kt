@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import kotlinx.collections.immutable.ImmutableMap
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -65,7 +66,6 @@ import org.readium.navigator.web.internals.webapi.SelectionListenerApi
 import org.readium.navigator.web.internals.webview.RelaxedWebView
 import org.readium.navigator.web.internals.webview.WebView
 import org.readium.navigator.web.internals.webview.WebViewScrollController
-import org.readium.navigator.web.internals.webview.invokeOnWebViewUpToDate
 import org.readium.navigator.web.internals.webview.rememberWebViewState
 import org.readium.navigator.web.reflowable.ReflowableWebDecoration
 import org.readium.navigator.web.reflowable.ReflowableWebDecorationCssSelectorLocation
@@ -191,11 +191,15 @@ internal fun ReflowableResource(
                     documentStateApi.listener = DelegatingDocumentApiListener(
                         onDocumentLoadedAndSizedDelegate = {
                             Timber.d("resource ${resourceState.index} onDocumentLoadedAndResized")
-                            webView.invokeOnWebViewUpToDate {
-                                val scrollController = WebViewScrollController(webView)
-                                resourceState.scrollController.value = scrollController
-                                Timber.d("resource ${resourceState.index} ready to scroll")
-
+                            // The document is loaded and sized; show it and settle the position.
+                            // The scroll controller is created earlier in onCreated so it is never
+                            // null even if this signal stalls (see the note there).
+                            showPlaceholder.value = false
+                            // Defer position settling by one message-loop turn so the native scroll
+                            // ranges catch up with the just-sized document.
+                            webView.post {
+                                val scrollController = resourceState.scrollController.value
+                                    ?: return@post
                                 when (val pending = resourceState.pendingLocation) {
                                     is ReflowableResourceLocation.HtmlId,
                                     is ReflowableResourceLocation.CssSelector,
@@ -216,7 +220,6 @@ internal fun ReflowableResource(
                                             direction = layoutDirection
                                         )
                                         onLocationChange()
-                                        showPlaceholder.value = false
                                     }
                                     null -> {
                                         scrollController.moveToProgression(
@@ -231,13 +234,7 @@ internal fun ReflowableResource(
                                             direction = layoutDirection
                                         )
                                         onLocationChange()
-                                        showPlaceholder.value = false
                                     }
-                                }
-
-                                webView.setOnScrollChangeListener { view, scrollX, scrollY, oldScrollX, oldScrollY ->
-                                    resourceState.updateProgression(orientation, layoutDirection)
-                                    onLocationChange()
                                 }
                             }
                         },
@@ -430,6 +427,36 @@ internal fun ReflowableResource(
             // FIXME: resource is laid out again, so we should apply progression again
         }
 
+        // Images served via shouldInterceptRequest decode asynchronously, often after the first
+        // paint, and the WebView's hardware layer does not repaint on its own once the placeholder
+        // is gone. Force a repaint WITHOUT a full document reflow: toggling the root transform via
+        // a double requestAnimationFrame keeps the transform applied for one rendered frame and then
+        // resets it. A display:none toggle would re-layout the whole chapter and freeze a just-settled
+        // page turn, so we avoid it (and the delayed second run) entirely.
+        LaunchedEffect(showPlaceholder.value) {
+            if (!showPlaceholder.value) {
+                val script = "(function(){var r=document.documentElement;var t=r.style.transform;" +
+                    "r.style.transform='translateZ(0)';" +
+                    "requestAnimationFrame(function(){requestAnimationFrame(function(){" +
+                    "r.style.transform=t||'';});});})()"
+                webViewState.webView?.evaluateJavascript(script, null)
+            }
+        }
+
+        // Fallback: if the "document loaded and sized" signal never arrives (a preloaded off-screen
+        // WebView whose requestAnimationFrame is throttled, or a stuck image decode), hide the
+        // placeholder after a timeout so a chapter is never stranded behind a permanent black cover.
+        // Healthy chapters complete sizing well before this, so the fallback is a no-op for them.
+        LaunchedEffect(webViewState.webView) {
+            webViewState.webView?.let {
+                delay(1500)
+                if (showPlaceholder.value) {
+                    Timber.d("resource ${resourceState.index} placeholder fallback (timeout)")
+                    showPlaceholder.value = false
+                }
+            }
+        }
+
         // Hide content before initial position is settled
         if (showPlaceholder.value) {
             Box(
@@ -469,6 +496,18 @@ internal fun ReflowableResource(
                     webview.isVerticalScrollBarEnabled = false
                     webview.isHorizontalScrollBarEnabled = false
                     webview.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                    // Create the scroll controller immediately instead of gated on the JS
+                    // "document loaded and sized" signal: a preloaded chapter WebView that is still
+                    // off-screen can have its requestAnimationFrame throttled by Chromium, so that
+                    // sizing signal may never fire. When it stalls, the controller stays null and
+                    // consumeInWebview swallows every swipe — the chapter can neither turn pages nor
+                    // scroll (a permanent black screen). The controller reads its scroll ranges
+                    // lazily, so building it before the document is sized is safe.
+                    resourceState.scrollController.value = WebViewScrollController(webview)
+                    webview.setOnScrollChangeListener { view, scrollX, scrollY, oldScrollX, oldScrollY ->
+                        resourceState.updateProgression(orientation, layoutDirection)
+                        onLocationChange()
+                    }
                     // Prevents vertical scrolling towards blank space.
                     // See https://github.com/readium/readium-css/issues/158
                     webview.setOnTouchListener { view, event ->

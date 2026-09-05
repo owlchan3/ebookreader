@@ -519,11 +519,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
                 val factory = ReflowableWebRenditionFactory(app, publication, reflowableConfig)
                 if (factory != null) {
-                    val prefs = when (result.savedTheme) {
-                        "sepia" -> ReflowableWebPreferences.SepiaTheme
-                        "dark" -> darkBeigeTheme
-                        else -> ReflowableWebPreferences()
-                    } + ReflowableWebPreferences(fontSize = result.savedFontSize, scroll = result.savedScroll)
+                    val prefs = buildPreferences()
                     _preferences.value = prefs
                     val state = factory.createRenditionState(
                         initialPreferences = prefs,
@@ -1108,6 +1104,21 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     // Preferences
+    /** 由当前主题/字号/滚动/颜色保真状态一次性构建最终阅读偏好。 */
+    private fun buildPreferences(): ReflowableWebPreferences {
+        val base = when (_themeKey.value) {
+            "sepia" -> sepiaPaperTheme
+            "dark" -> darkBeigeTheme
+            else -> defaultTheme
+        }
+        // 三个主题统一 `overridePublisherColors=false`：主题只提供背景色与默认文字色，
+        // 书籍里自带的彩色/深色文字、强调样式一律按书籍原样保留，不强制全书用主题色。
+        return base + ReflowableWebPreferences(
+            fontSize = _fontSize.value,
+            scroll = _scrollMode.value,
+        )
+    }
+
     fun applyFontSize(size: Double) {
         // 改字号前记录当前阅读位置（href + progression，二者按内容 position 定义、与字号无关），
         // 改完重排后恢复，确保不跳到章首或错页。
@@ -1115,12 +1126,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         val prevLoc = ctrl?.location
 
         _fontSize.value = size
-        val base = when (_themeKey.value) {
-            "sepia" -> ReflowableWebPreferences.SepiaTheme
-            "dark" -> darkBeigeTheme
-            else -> ReflowableWebPreferences()
-        }
-        val newPrefs = base + ReflowableWebPreferences(fontSize = size, scroll = _scrollMode.value)
+        val newPrefs = buildPreferences()
         _preferences.value = newPrefs
         val s = _uiState.value
         if (s is ReaderUiState.Ready && s.controller != null) s.controller.preferences = newPrefs
@@ -1145,7 +1151,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     fun applyScrollMode(scroll: Boolean) {
         _scrollMode.value = scroll
-        val merged = _preferences.value + ReflowableWebPreferences(scroll = scroll)
+        val merged = buildPreferences()
         _preferences.value = merged
         val s = _uiState.value
         if (s is ReaderUiState.Ready && s.controller != null) s.controller.preferences = merged
@@ -1156,12 +1162,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
 
     fun applyTheme(key: String) {
         _themeKey.value = key
-        val base = when (key) {
-            "sepia" -> ReflowableWebPreferences.SepiaTheme
-            "dark" -> darkBeigeTheme
-            else -> ReflowableWebPreferences()
-        }
-        val merged = base + ReflowableWebPreferences(fontSize = _fontSize.value, scroll = _scrollMode.value)
+        val merged = buildPreferences()
         _preferences.value = merged
         val s = _uiState.value
         if (s is ReaderUiState.Ready && s.controller != null) s.controller.preferences = merged
@@ -3104,12 +3105,24 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             }
         )
         private val fixedConfig = FixedWebConfiguration()
+        // 默认主题：近黑字 + 白底，保留书籍自带文字色。
+        private val defaultTheme = ReflowableWebPreferences(
+            overridePublisherColors = false,
+        )
+        // 棕褐主题：暖纸色 + 暖棕字，保留书籍自带文字色；链接用暖棕链接色。
+        private val sepiaPaperTheme = ReflowableWebPreferences(
+            textColor = org.readium.r2.navigator.preferences.Color(android.graphics.Color.parseColor("#3A2D1F")),
+            backgroundColor = org.readium.r2.navigator.preferences.Color(android.graphics.Color.parseColor("#E6D0A3")),
+            linkColor = org.readium.r2.navigator.preferences.Color(android.graphics.Color.parseColor("#7A4A12")),
+            visitedColor = org.readium.r2.navigator.preferences.Color(android.graphics.Color.parseColor("#6B4E7A")),
+            overridePublisherColors = false,
+        )
         private val darkBeigeTheme = ReflowableWebPreferences(
             textColor = org.readium.r2.navigator.preferences.Color(android.graphics.Color.parseColor("#FFEFD5")),
             backgroundColor = org.readium.r2.navigator.preferences.Color(android.graphics.Color.parseColor("#000000")),
             linkColor = org.readium.r2.navigator.preferences.Color(android.graphics.Color.parseColor("#63caff")),
             visitedColor = org.readium.r2.navigator.preferences.Color(android.graphics.Color.parseColor("#0099E5")),
-            overridePublisherColors = true,
+            overridePublisherColors = false,
         )
     }
 }

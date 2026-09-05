@@ -16,6 +16,9 @@ import org.readium.r2.shared.util.toUrl
 import org.readium.r2.streamer.PublicationOpener
 import org.readium.r2.streamer.parser.DefaultPublicationParser
 import com.ebookreader.di.Injector
+import com.ebookreader.data.importer.mobi.MobiChapter
+import com.ebookreader.data.importer.mobi.MobiImage
+import com.ebookreader.data.importer.mobi.parseMobi
 import timber.log.Timber
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -40,114 +43,146 @@ class BookImporter(private val context: Context) {
     suspend fun importFromUri(uri: Uri): Result<ImportedBook> = withContext(Dispatchers.IO) {
         try {
             val fileName = getFileName(uri) ?: "unknown.epub"
-            val internalDir = File(context.filesDir, "books")
-            internalDir.mkdirs()
-            val destFile = File(internalDir, "${System.currentTimeMillis()}_$fileName")
-            val extension = destFile.extension.lowercase()
-
-            // Copy file to internal storage
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(destFile).use { output -> input.copyTo(output) }
-            } ?: return@withContext Result.failure(Exception("无法读取文件"))
-
-            // Track original format before potential TXT→EPUB conversion
-            val originalExtension = extension
-
-            // Handle DOCX: extract text → save as .txt → import through TXT pipeline
-            val bookFile = if (extension == "docx") {
-                val epubFile = convertDocxToTxt(destFile)
-                // Delete the original .docx copy, keep only the generated files
-                destFile.delete()
-                epubFile
-            } else if (extension == "txt") {
-                // 保留源 .txt 文件：刷新目录 / 合并章节（reconvertTxt）需要它作为章节再识别的依据。
-                convertTxtToEpub(destFile)
-            } else if (extension == "epub") {
-                val fixed = sanitizeEpubXhtml(destFile)
-                // 生成修复副本后删除原 EPUB，只保留修复版，避免双份占用
-                if (fixed != destFile) {
-                    destFile.delete()
-                    // sanitizeEpubXhtml 已含 stripTrailingAfterHtml，标记避免打开时重复扫描
-                    markTrailingStripped(fixed)
-                }
-                fixed
-            } else if (extension == "doc") {
-                // Legacy .doc not supported without Apache POI
-                return@withContext Result.failure(Exception("暂不支持 .doc 格式，请转换为 .docx 或 .txt 后再导入"))
-            } else {
-                destFile
-            }
-
-            // Parse with Readium (now with PDF support via PdfiumDocumentFactory)
-            val url = bookFile.toUrl(isDirectory = false)
-            val asset = assetRetriever.retrieve(url).getOrElse {
-                return@withContext Result.failure(Exception("无法解析文件"))
-            }
-            val publication = publicationOpener.open(asset, allowUserInteraction = false).getOrElse {
-                asset.close()
-                return@withContext Result.failure(Exception("不支持的格式: ${bookFile.extension}"))
-            }
-
-            val rawTitle = publication.metadata.title ?: bookFile.nameWithoutExtension
-            // Strip leading timestamp prefix (e.g. "1723123456789_mybook" -> "mybook")
-            val title = rawTitle.replaceFirst(Regex("""^\d{10,}_"""), "")
-            val author = publication.metadata.authors.joinToString(", ") { it.name }
-            val description = publication.metadata.description ?: ""
-            val format = detectFormat(originalExtension)  // Use original ext, not converted one
-            // Compute accurate page count using positions (same as ReaderViewModel)
-            val positionsList = publication.positionsByReadingOrder()
-            val totalPositions = positionsList.sumOf { it.size }
-            val totalPages = maxOf(totalPositions, publication.readingOrder.size)
-            val fileSize = bookFile.length()
-
-            // Extract cover (downscaled to a thumbnail so the bookshelf scrolls smoothly)
-            val coverPath = try {
-                val coverBitmap = publication.cover()
-                if (coverBitmap != null) {
-                    val coverDir = File(context.filesDir, "covers"); coverDir.mkdirs()
-                    val coverFile = File(coverDir, "${bookFile.nameWithoutExtension}.jpg")
-                    val maxDim = 400
-                    val scaled = if (coverBitmap.width > maxDim || coverBitmap.height > maxDim) {
-                        val ratio = minOf(maxDim.toFloat() / coverBitmap.width, maxDim.toFloat() / coverBitmap.height)
-                        Bitmap.createScaledBitmap(
-                            coverBitmap,
-                            (coverBitmap.width * ratio).toInt().coerceAtLeast(1),
-                            (coverBitmap.height * ratio).toInt().coerceAtLeast(1),
-                            true
-                        )
-                    } else coverBitmap
-                    FileOutputStream(coverFile).use { scaled.compress(Bitmap.CompressFormat.JPEG, 85, it) }
-                    if (scaled !== coverBitmap) scaled.recycle()
-                    coverFile.absolutePath
-                } else null
-            } catch (_: Exception) { null }
-
-            // 字数：PDF 按「每页 600 字」估算（跳过 PDFium 全文抽取，避免内存过大）；
-            // 其余格式复用全文抽取管线统计非空白字符数。
-            val totalCharacters = if (format == "PDF") {
-                totalPages.toLong() * 600L
-            } else {
-                runCatching {
-                    Injector.chatRepository().countCharacters(bookFile.absolutePath, format)
-                }.getOrDefault(0L)
-            }
-
-            val book = com.ebookreader.domain.model.Book(
-                title = title, author = author.ifEmpty { "未知作者" },
-                description = description, coverPath = coverPath,
-                filePath = bookFile.absolutePath, format = format,
-                totalPages = totalPages, currentPage = 0, currentLocator = null,
-                totalReadingTime = 0, addedTimestamp = System.currentTimeMillis(),
-                lastReadTimestamp = 0, fileSize = fileSize,
-                totalCharacters = totalCharacters,
-            )
-
-            publication.close(); asset.close()
-            Result.success(ImportedBook(book, coverPath))
+            val destFile = copyToInternal(uri, fileName)
+                ?: return@withContext Result.failure(Exception("无法读取文件"))
+            processCopied(destFile)
         } catch (e: Exception) {
             Timber.e(e, "Import failed")
             Result.failure(e)
         }
+    }
+
+    private fun internalBooksDir(): File =
+        File(context.filesDir, "books").also { it.mkdirs() }
+
+    /** 复制到内部 books 目录（带时间戳前缀），失败返回 null。 */
+    private fun copyToInternal(uri: Uri, fileName: String): File? {
+        val destFile = File(internalBooksDir(), "${System.currentTimeMillis()}_$fileName")
+        val ok = if (uri.scheme == "file") {
+            // 「打开方式」可能传 file:// URI：直接按路径读
+            val path = uri.path
+            path != null && runCatching {
+                File(path).inputStream().use { input ->
+                    FileOutputStream(destFile).use { output -> input.copyTo(output) }
+                }
+                true
+            }.getOrDefault(false)
+        } else {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(destFile).use { output -> input.copyTo(output) }
+            } != null
+        }
+        return if (ok) destFile else null
+    }
+
+    /** 对已复制到内部存储的文件做格式转换 + Readium 解析 + 建书。 */
+    private suspend fun processCopied(destFile: File): Result<ImportedBook> {
+        val extension = destFile.extension.lowercase()
+        // 记录原始扩展名（用于 format 显示）；内容嗅探到 MOBI 时会被改写为 "mobi"
+        var originalExtension = extension
+
+        // Handle DOCX: extract text → save as .txt → import through TXT pipeline
+        val bookFile = if (extension == "docx") {
+            val epubFile = convertDocxToTxt(destFile)
+            // Delete the original .docx copy, keep only the generated files
+            destFile.delete()
+            epubFile
+        } else if (extension == "txt") {
+            // 保留源 .txt 文件：刷新目录 / 合并章节（reconvertTxt）需要它作为章节再识别的依据。
+            convertTxtToEpub(destFile)
+        } else if (extension == "epub") {
+            val fixed = sanitizeEpubXhtml(destFile)
+            // 生成修复副本后删除原 EPUB，只保留修复版，避免双份占用
+            if (fixed != destFile) {
+                destFile.delete()
+                // sanitizeEpubXhtml 已含 stripTrailingAfterHtml，标记避免打开时重复扫描
+                markTrailingStripped(fixed)
+            }
+            fixed
+        } else if (extension == "doc") {
+            // Legacy .doc not supported without Apache POI
+            return Result.failure(Exception("暂不支持 .doc 格式，请转换为 .docx 或 .txt 后再导入"))
+        } else if (extension == "mobi" || extension == "azw" || extension == "azw3") {
+            // MOBI/AZW3 → EPUB：解析 mobi7 正文 → 章节 → EPUB（删除原文件，保留生成的 EPUB）
+            val epubFile = convertMobiToEpub(destFile)
+            destFile.delete()
+            epubFile
+        } else if (isPdbMobi(destFile)) {
+            // QQ/Edge 可能把 azw3 按 MIME(octet-stream) 另存为 .bin/.prc：按内容嗅探识别为 MOBI/AZW3
+            originalExtension = "mobi"
+            val epubFile = convertMobiToEpub(destFile)
+            destFile.delete()
+            epubFile
+        } else {
+            destFile
+        }
+
+        // Parse with Readium (now with PDF support via PdfiumDocumentFactory)
+        val url = bookFile.toUrl(isDirectory = false)
+        val asset = assetRetriever.retrieve(url).getOrElse {
+            return Result.failure(Exception("无法解析文件"))
+        }
+        val publication = publicationOpener.open(asset, allowUserInteraction = false).getOrElse {
+            asset.close()
+            return Result.failure(Exception("不支持的格式: ${bookFile.extension}"))
+        }
+
+        val rawTitle = publication.metadata.title ?: bookFile.nameWithoutExtension
+        // Strip leading timestamp prefix (e.g. "1723123456789_mybook" -> "mybook")
+        val title = rawTitle.replaceFirst(Regex("""^\d{10,}_"""), "")
+        val author = publication.metadata.authors.joinToString(", ") { it.name }
+        val description = publication.metadata.description ?: ""
+        val format = detectFormat(originalExtension)  // Use original ext, not converted one
+        // Compute accurate page count using positions (same as ReaderViewModel)
+        val positionsList = publication.positionsByReadingOrder()
+        val totalPositions = positionsList.sumOf { it.size }
+        val totalPages = maxOf(totalPositions, publication.readingOrder.size)
+        val fileSize = bookFile.length()
+
+        // Extract cover (downscaled to a thumbnail so the bookshelf scrolls smoothly)
+        val coverPath = try {
+            val coverBitmap = publication.cover()
+            if (coverBitmap != null) {
+                val coverDir = File(context.filesDir, "covers"); coverDir.mkdirs()
+                val coverFile = File(coverDir, "${bookFile.nameWithoutExtension}.jpg")
+                val maxDim = 400
+                val scaled = if (coverBitmap.width > maxDim || coverBitmap.height > maxDim) {
+                    val ratio = minOf(maxDim.toFloat() / coverBitmap.width, maxDim.toFloat() / coverBitmap.height)
+                    Bitmap.createScaledBitmap(
+                        coverBitmap,
+                        (coverBitmap.width * ratio).toInt().coerceAtLeast(1),
+                        (coverBitmap.height * ratio).toInt().coerceAtLeast(1),
+                        true
+                    )
+                } else coverBitmap
+                FileOutputStream(coverFile).use { scaled.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                if (scaled !== coverBitmap) scaled.recycle()
+                coverFile.absolutePath
+            } else null
+        } catch (_: Exception) { null }
+
+        // 字数：PDF 按「每页 600 字」估算（跳过 PDFium 全文抽取，避免内存过大）；
+        // 其余格式复用全文抽取管线统计非空白字符数。
+        val totalCharacters = if (format == "PDF") {
+            totalPages.toLong() * 600L
+        } else {
+            runCatching {
+                Injector.chatRepository().countCharacters(bookFile.absolutePath, format)
+            }.getOrDefault(0L)
+        }
+
+        val book = com.ebookreader.domain.model.Book(
+            title = title, author = author.ifEmpty { "未知作者" },
+            description = description, coverPath = coverPath,
+            filePath = bookFile.absolutePath, format = format,
+            totalPages = totalPages, currentPage = 0, currentLocator = null,
+            totalReadingTime = 0, addedTimestamp = System.currentTimeMillis(),
+            lastReadTimestamp = 0, fileSize = fileSize,
+            totalCharacters = totalCharacters,
+        )
+
+        publication.close(); asset.close()
+        return Result.success(ImportedBook(book, coverPath))
     }
 
     // ── Encoding detection ──────────────────────────────────────────────
@@ -250,65 +285,65 @@ class BookImporter(private val context: Context) {
             Regex("""^\s*[Bb]ook\s+\d+.*$"""),
             Regex("""^\s*[Vv]olume\s+\d+.*$"""),
         )
-    }
 
-    /**
-     * Scans the full text line by line and returns a list of detected chapter boundaries.
-     * @param text the full book text
-     * @param extraPatterns additional user-defined regex patterns (compiled, validated strings)
-     * If no chapters are found, returns an empty list (caller should treat the whole file as one chapter).
-     */
-    internal fun detectChapters(text: String, extraPatterns: List<String> = emptyList()): List<DetectedChapter> {
-        val userPatterns = extraPatterns.mapNotNull { p ->
-            try { Regex(p) } catch (_: Exception) { null }
-        }
-        val chapterPatterns = builtinChapterPatterns + userPatterns
+        /**
+         * Scans the full text line by line and returns a list of detected chapter boundaries.
+         * @param text the full book text
+         * @param extraPatterns additional user-defined regex patterns (compiled, validated strings)
+         * If no chapters are found, returns an empty list (caller should treat the whole file as one chapter).
+         */
+        internal fun detectChapters(text: String, extraPatterns: List<String> = emptyList()): List<DetectedChapter> {
+            val userPatterns = extraPatterns.mapNotNull { p ->
+                try { Regex(p) } catch (_: Exception) { null }
+            }
+            val chapterPatterns = builtinChapterPatterns + userPatterns
 
-        // 第一遍：找出所有标题（暂不去重）
-        val rawChapters = mutableListOf<DetectedChapter>()
-        var charOffset = 0
-        val lines = text.split("\n")
-        for (line in lines) {
-            for (pattern in chapterPatterns) {
-                val match = pattern.find(line)
-                if (match != null) {
-                    rawChapters.add(DetectedChapter(match.value.trim(), charOffset))
-                    break
+            // 第一遍：找出所有标题（暂不去重）
+            val rawChapters = mutableListOf<DetectedChapter>()
+            var charOffset = 0
+            val lines = text.split("\n")
+            for (line in lines) {
+                for (pattern in chapterPatterns) {
+                    val match = pattern.find(line)
+                    if (match != null) {
+                        rawChapters.add(DetectedChapter(match.value.trim(), charOffset))
+                        break
+                    }
+                }
+                charOffset += line.length + 1 // +1 for \n
+            }
+
+            // 第二遍：过滤「伪章节」——标题到下一个标题之间的内容不足 100 字，通常是目录条目
+            // 或叙述里提到的「第X话」；再按标题去重，保留第一个「真实」章节（目录里的同名标题
+            // 内容短被跳过，正文里的真章节被保留）。
+            val minChapterChars = 100
+            val chapters = mutableListOf<DetectedChapter>()
+            for (i in rawChapters.indices) {
+                val ch = rawChapters[i]
+                val end = if (i + 1 < rawChapters.size) rawChapters[i + 1].startIndex else text.length
+                if (end - ch.startIndex < minChapterChars) continue
+                if (chapters.none { it.title == ch.title }) {
+                    chapters.add(ch)
                 }
             }
-            charOffset += line.length + 1 // +1 for \n
-        }
 
-        // 第二遍：过滤「伪章节」——标题到下一个标题之间的内容不足 100 字，通常是目录条目
-        // 或叙述里提到的「第X话」；再按标题去重，保留第一个「真实」章节（目录里的同名标题
-        // 内容短被跳过，正文里的真章节被保留）。
-        val minChapterChars = 100
-        val chapters = mutableListOf<DetectedChapter>()
-        for (i in rawChapters.indices) {
-            val ch = rawChapters[i]
-            val end = if (i + 1 < rawChapters.size) rawChapters[i + 1].startIndex else text.length
-            if (end - ch.startIndex < minChapterChars) continue
-            if (chapters.none { it.title == ch.title }) {
-                chapters.add(ch)
+            // Filter out false positives: if a "chapter" appears only once and there are 50+ candidates,
+            // many of them are likely paragraph numbers, not chapters.
+            return if (chapters.size > 30) {
+                chapters.filter { ch ->
+                    val t = ch.title
+                    t.contains("章") || t.contains("回") || t.contains("卷") ||
+                        t.contains("节") || t.contains("部") || t.contains("篇") ||
+                        t.contains("话") ||
+                        t.startsWith("序") || t.startsWith("楔") || t.startsWith("前言") ||
+                        t.startsWith("后记") || t.startsWith("尾声") || t.startsWith("番外") ||
+                        t.startsWith("附录") || t.startsWith("终章") || t.startsWith("引子") ||
+                        t.startsWith("Prologue") || t.startsWith("Epilogue") ||
+                        t.startsWith("Chapter")
+                }
+            } else {
+                chapters
             }
-        }
-
-        // Filter out false positives: if a "chapter" appears only once and there are 50+ candidates,
-        // many of them are likely paragraph numbers, not chapters.
-        return if (chapters.size > 30) {
-            chapters.filter { ch ->
-                val t = ch.title
-                t.contains("章") || t.contains("回") || t.contains("卷") ||
-                    t.contains("节") || t.contains("部") || t.contains("篇") ||
-                    t.contains("话") ||
-                    t.startsWith("序") || t.startsWith("楔") || t.startsWith("前言") ||
-                    t.startsWith("后记") || t.startsWith("尾声") || t.startsWith("番外") ||
-                    t.startsWith("附录") || t.startsWith("终章") || t.startsWith("引子") ||
-                    t.startsWith("Prologue") || t.startsWith("Epilogue") ||
-                    t.startsWith("Chapter")
-            }
-        } else {
-            chapters
         }
     }
 
@@ -502,7 +537,13 @@ class BookImporter(private val context: Context) {
     )
 
     /** Writes an EPUB file with one spine item per chapter. */
-    private fun writeEpubWithChapters(epubFile: File, title: String, chapters: List<EpubChapter>) {
+    private fun writeEpubWithChapters(
+        epubFile: File,
+        title: String,
+        chapters: List<EpubChapter>,
+        author: String? = null,
+        description: String? = null,
+    ) {
         java.util.zip.ZipOutputStream(java.io.FileOutputStream(epubFile)).use { zip ->
             val mimetypeBytes = "application/epub+zip".toByteArray()
             val mimetypeEntry = java.util.zip.ZipEntry("mimetype").apply {
@@ -541,13 +582,19 @@ $navOl        </ol></nav></body></html>""".toByteArray())
                 manifest.append("    <item id=\"$id\" href=\"$id.xhtml\" media-type=\"application/xhtml+xml\"/>\n")
                 spine.append("    <itemref idref=\"$id\"/>\n")
             }
+            val metaCreator = author?.takeIf { it.isNotBlank() }?.let {
+                "    <dc:creator xmlns:dc=\"http://purl.org/dc/elements/1.1/\">${it.xmlEscape()}</dc:creator>\n"
+            } ?: ""
+            val metaDescription = description?.takeIf { it.isNotBlank() }?.let {
+                "    <dc:description xmlns:dc=\"http://purl.org/dc/elements/1.1/\">${it.xmlEscape()}</dc:description>\n"
+            } ?: ""
             zip.putNextEntry(java.util.zip.ZipEntry("OEBPS/content.opf"))
             zip.write("""<?xml version="1.0" encoding="UTF-8"?>
 <package version="3.0" unique-identifier="book-id" xmlns="http://www.idpf.org/2007/opf">
   <metadata>
     <dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">${title.xmlEscape()}</dc:title>
     <dc:language xmlns:dc="http://purl.org/dc/elements/1.1/">zh-CN</dc:language>
-  </metadata>
+$metaCreator$metaDescription  </metadata>
   <manifest>$manifest  </manifest>
   <spine>$spine  </spine>
 </package>""".toByteArray())
@@ -1187,9 +1234,173 @@ $navOl        </ol></nav></body></html>""".toByteArray())
         } catch (_: Exception) { uri.lastPathSegment }
     }
 
+    // ── MOBI / AZW3 → EPUB conversion ────────────────────────────────────
+
+    /**
+     * 解析 .mobi/.azw/.azw3 的 mobi7 正文 → 保真切分（原生标题/图片/封面）→ 生成 EPUB。
+     */
+    private fun convertMobiToEpub(mobiFile: File): File {
+        val doc = parseMobi(mobiFile)
+        if (doc.chapters.isEmpty()) throw Exception("无法从该文件中提取文本内容")
+        val title = doc.title.ifBlank {
+            mobiFile.nameWithoutExtension.replaceFirst(Regex("""^\d{10,}_"""), "")
+        }
+        val epubFile = File(mobiFile.parentFile, "${mobiFile.nameWithoutExtension}.epub")
+        writeMobiEpub(epubFile, title, doc.chapters, doc.author, doc.description, doc.cover, doc.images)
+        return epubFile
+    }
+
+    /** 保真写入 MOBI 转换出的 EPUB：原生 HTML 章节 + 图片 + 封面 + 目录。 */
+    private fun writeMobiEpub(
+        epubFile: File,
+        title: String,
+        chapters: List<MobiChapter>,
+        author: String?,
+        description: String?,
+        cover: MobiImage?,
+        images: List<MobiImage>,
+    ) {
+        java.util.zip.ZipOutputStream(java.io.FileOutputStream(epubFile)).use { zip ->
+            val mimetypeBytes = "application/epub+zip".toByteArray()
+            val mimetypeEntry = java.util.zip.ZipEntry("mimetype").apply {
+                method = java.util.zip.ZipEntry.STORED
+                size = mimetypeBytes.size.toLong()
+                compressedSize = mimetypeBytes.size.toLong()
+                crc = java.util.zip.CRC32().also { it.update(mimetypeBytes) }.value
+            }
+            zip.putNextEntry(mimetypeEntry); zip.write(mimetypeBytes); zip.closeEntry()
+
+            zip.putNextEntry(java.util.zip.ZipEntry("META-INF/container.xml"))
+            zip.write("""<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>""".toByteArray())
+            zip.closeEntry()
+
+            val navOl = StringBuilder()
+            for ((ci, ch) in chapters.withIndex()) {
+                navOl.append("        <li><a href=\"c${ci}.xhtml\">${ch.title.xmlEscape()}</a></li>\n")
+            }
+            zip.putNextEntry(java.util.zip.ZipEntry("OEBPS/nav.xhtml"))
+            zip.write("""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>${title.xmlEscape()} - 目录</title></head>
+<body><nav epub:type="toc"><h1>目录</h1><ol>
+$navOl        </ol></nav></body></html>""".toByteArray())
+            zip.closeEntry()
+
+            val manifest = StringBuilder()
+            val spine = StringBuilder()
+            manifest.append("    <item id=\"nav\" href=\"nav.xhtml\" media-type=\"application/xhtml+xml\" properties=\"nav\"/>\n")
+
+            // 封面页（若有封面图）
+            if (cover != null) {
+                manifest.append("    <item id=\"cover-page\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n")
+                spine.append("    <itemref idref=\"cover-page\"/>\n")
+            }
+
+            for (ci in chapters.indices) {
+                manifest.append("    <item id=\"c$ci\" href=\"c$ci.xhtml\" media-type=\"application/xhtml+xml\"/>\n")
+                spine.append("    <itemref idref=\"c$ci\"/>\n")
+            }
+            for (img in images) {
+                val props = if (cover != null && img.recordIndex == cover.recordIndex) " properties=\"cover-image\"" else ""
+                manifest.append("    <item id=\"img-${img.recordIndex}\" href=\"images/${img.fileName}\" media-type=\"${img.mime}\"$props/>\n")
+            }
+
+            val metaCreator = author?.takeIf { it.isNotBlank() }?.let {
+                "    <dc:creator xmlns:dc=\"http://purl.org/dc/elements/1.1/\">${it.xmlEscape()}</dc:creator>\n"
+            } ?: ""
+            val metaDescription = description?.takeIf { it.isNotBlank() }?.let {
+                "    <dc:description xmlns:dc=\"http://purl.org/dc/elements/1.1/\">${it.xmlEscape()}</dc:description>\n"
+            } ?: ""
+            val metaCover = cover?.let { "    <meta name=\"cover\" content=\"img-${it.recordIndex}\"/>\n" } ?: ""
+
+            zip.putNextEntry(java.util.zip.ZipEntry("OEBPS/content.opf"))
+            zip.write("""<?xml version="1.0" encoding="UTF-8"?>
+<package version="3.0" unique-identifier="book-id" xmlns="http://www.idpf.org/2007/opf">
+  <metadata>
+    <dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">${title.xmlEscape()}</dc:title>
+    <dc:language xmlns:dc="http://purl.org/dc/elements/1.1/">zh-CN</dc:language>
+$metaCreator$metaDescription$metaCover  </metadata>
+  <manifest>$manifest  </manifest>
+  <spine>$spine  </spine>
+</package>""".toByteArray())
+            zip.closeEntry()
+
+            // 封面页
+            if (cover != null) {
+                zip.putNextEntry(java.util.zip.ZipEntry("OEBPS/cover.xhtml"))
+                zip.write("""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>封面</title></head>
+<body style="margin:0;text-align:center;"><img src="images/${cover.fileName}" alt="封面" style="max-width:100%;max-height:100%;"/></body></html>""".toByteArray())
+                zip.closeEntry()
+            }
+
+            for ((ci, ch) in chapters.withIndex()) {
+                zip.putNextEntry(java.util.zip.ZipEntry("OEBPS/c${ci}.xhtml"))
+                // 按内容判定是否已是完整 XHTML：组合格式（mobi7+mobi8）走 mobi7 路径时，
+                // bodyHtml 是正文片段（无 <html>/<head>），必须套壳；否则 Readium 注入 CSS
+                // 找不到 <head> 抛异常，WebView 报 net::ERR_FAILED。
+                val trimmed = ch.bodyHtml.trimStart()
+                val isFullDocument = trimmed.startsWith("<?xml", ignoreCase = true) ||
+                    trimmed.startsWith("<!DOCTYPE", ignoreCase = true) ||
+                    trimmed.startsWith("<html", ignoreCase = true)
+                if (isFullDocument) {
+                    // 完整 XHTML（含 html/head/body），直接写入
+                    zip.write(ch.bodyHtml.toByteArray(Charsets.UTF_8))
+                } else {
+                    zip.write("""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>${ch.title.xmlEscape()}</title>
+<style>body{font-family:serif;font-size:1em;line-height:1.8;padding:1em;}img{max-width:100%;}</style></head>
+<body>${ch.bodyHtml}</body></html>""".toByteArray())
+                }
+                zip.closeEntry()
+            }
+
+            for (img in images) {
+                zip.putNextEntry(java.util.zip.ZipEntry("OEBPS/images/${img.fileName}"))
+                zip.write(img.bytes)
+                zip.closeEntry()
+            }
+        }
+        epubGenMarker(epubFile).writeText(EPUB_GEN_VERSION.toString())
+    }
+
     private fun detectFormat(extension: String) = when (extension.lowercase()) {
         "epub" -> "EPUB"; "pdf" -> "PDF"; "cbz" -> "CBZ"; "mobi" -> "MOBI"
         "azw", "azw3" -> "AZW"; "txt" -> "TXT"; "docx" -> "DOCX"
         else -> extension.uppercase()
     }
+
+    /**
+     * 内容嗅探：判断文件是否为 PalmDB/MOBI 容器（PDB 头 type="BOOK" + creator="MOBI"）。
+     * 用于识别 QQ/Edge 把 azw3 按 MIME(octet-stream) 另存为 .bin/.prc 的文件。
+     */
+    private fun isPdbMobi(file: File): Boolean {
+        return try {
+            val head = ByteArray(68)
+            var read = 0
+            file.inputStream().use { ins ->
+                while (read < head.size) {
+                    val n = ins.read(head, read, head.size - read)
+                    if (n < 0) break
+                    read += n
+                }
+            }
+            if (read < 68) return false
+            val type = String(head, 60, 4, Charsets.US_ASCII)
+            val creator = String(head, 64, 4, Charsets.US_ASCII)
+            type == "BOOK" && creator == "MOBI"
+        } catch (_: Exception) {
+            false
+        }
+    }
+
 }
+

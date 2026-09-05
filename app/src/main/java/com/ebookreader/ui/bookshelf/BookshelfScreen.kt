@@ -95,6 +95,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.ebookreader.MainActivity
 import com.ebookreader.domain.model.Book
 import com.ebookreader.domain.model.Tag
 import com.ebookreader.domain.model.TagGroup
@@ -155,6 +156,15 @@ fun BookshelfScreen(
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> -> if (uris.isNotEmpty()) viewModel.importBooks(uris) }
+
+    // 「打开方式」传入的待导入文件
+    val pendingImport by MainActivity.importRequests.collectAsState()
+    LaunchedEffect(pendingImport) {
+        pendingImport?.let { uri ->
+            MainActivity.importRequests.value = null
+            viewModel.importBooks(listOf(uri))
+        }
+    }
 
     LaunchedEffect(importError) {
         importError?.let { msg ->
@@ -353,6 +363,9 @@ fun BookshelfScreen(
                                 DropdownMenuItem(
                                     text = { Text("按添加时间") },
                                     onClick = { viewModel.setSortMode(SortMode.DATE_ADDED); showSortMenu = false })
+                                DropdownMenuItem(
+                                    text = { Text("按格式") },
+                                    onClick = { viewModel.setSortMode(SortMode.FORMAT); showSortMenu = false })
                             }
                             IconButton(onClick = {
                                 filePickerLauncher.launch(arrayOf(

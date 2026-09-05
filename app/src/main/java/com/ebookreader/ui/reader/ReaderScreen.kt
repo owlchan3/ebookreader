@@ -21,6 +21,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.clip
@@ -1406,8 +1407,8 @@ fun ReaderScreen(
                         androidx.compose.ui.graphics.Color(0xFF121212)) {
                         viewModel.applyTheme("default")
                     }
-                    ThemeChip("棕褐", androidx.compose.ui.graphics.Color(0xFFfaf4e8),
-                        androidx.compose.ui.graphics.Color(0xFF121212)) {
+                    ThemeChip("棕褐", androidx.compose.ui.graphics.Color(0xFFF0E2C4),
+                        androidx.compose.ui.graphics.Color(0xFF3A2D1F)) {
                         viewModel.applyTheme("sepia")
                     }
                     ThemeChip("暗黑", androidx.compose.ui.graphics.Color(0xFF000000),
