@@ -38,6 +38,12 @@ android {
         versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 仅打包真机 ABI，去掉 x86/x86_64（模拟器），显著减小 APK 体积。
+        // ONNX Runtime 原生库较大（四 ABI 合计约 73MB），此过滤直接省掉约 43MB。
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     compileOptions {
@@ -130,5 +136,14 @@ dependencies {
 
     // OkHttp (for AI plugin API calls)
     implementation(libs.okhttp)
+
+    // On-device embedding (RAG retrieval)
+    implementation(libs.onnxruntime.android)
+
+    // Apache POI（.doc 老格式二进制提取文字）
+    implementation(libs.poi.scratchpad)
+
+    // OpenCC4j（词级繁简转换）
+    implementation(libs.opencc4j)
 
 }

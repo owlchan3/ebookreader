@@ -113,6 +113,7 @@ fun SettingsScreen(
     var editingTag by remember { mutableStateOf<Tag?>(null) }
     var showDeleteTagDialog by remember { mutableStateOf<Tag?>(null) }
     var showReadTagIntro by remember { mutableStateOf(false) }
+    var showPinTagIntro by remember { mutableStateOf(false) }
 
     val aiEnabled by viewModel.aiEnabled.collectAsState()
     val apiKey by viewModel.apiKey.collectAsState()
@@ -442,6 +443,16 @@ fun SettingsScreen(
                                                 InputChip(
                                                     selected = false,
                                                     onClick = { showReadTagIntro = true },
+                                                    label = { Text(tag.name, fontSize = 13.sp) },
+                                                    colors = InputChipDefaults.inputChipColors(
+                                                        containerColor = Color(0xFF363029),
+                                                        labelColor = Color(0xFFC9BFA8),
+                                                    ),
+                                                )
+                                            } else if (tag.isPinTag) {
+                                                InputChip(
+                                                    selected = false,
+                                                    onClick = { showPinTagIntro = true },
                                                     label = { Text(tag.name, fontSize = 13.sp) },
                                                     colors = InputChipDefaults.inputChipColors(
                                                         containerColor = Color(0xFF363029),
@@ -1436,6 +1447,25 @@ fun SettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showReadTagIntro = false }) { Text("知道了") }
+            },
+        )
+    }
+
+    // 「置顶」特殊标签功能介绍
+    if (showPinTagIntro) {
+        AlertDialog(
+            onDismissRequest = { showPinTagIntro = false },
+            title = { Text("「置顶」标签") },
+            text = {
+                Text(
+                    "「置顶」是一个特殊标签，用于把你常用的书籍固定到书架顶部。\n\n" +
+                        "· 不可删除\n" +
+                        "· 当书架按「最近阅读」排列时，带「置顶」标签的书籍会排在最前面；多本置顶的书彼此仍按最近阅读顺序排列（其它排列方式不受影响）。\n\n" +
+                        "你可以在任意一本书的详情页，把「置顶」标签添加到该书，即可置顶。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showPinTagIntro = false }) { Text("知道了") }
             },
         )
     }

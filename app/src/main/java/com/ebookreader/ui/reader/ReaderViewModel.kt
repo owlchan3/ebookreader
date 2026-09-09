@@ -60,6 +60,7 @@ import org.readium.navigator.web.reflowable.ReflowableWebRenditionController
 import org.readium.navigator.web.reflowable.ReflowableWebRenditionFactory
 import org.readium.navigator.web.reflowable.ReflowableWebRenditionState
 import org.readium.navigator.web.reflowable.preferences.ReflowableWebPreferences
+import org.readium.r2.navigator.preferences.ReadingProgression
 import org.readium.r2.shared.ExperimentalReadiumApi
 import org.readium.navigator.common.Decoration
 import org.readium.navigator.common.Progression
@@ -218,6 +219,10 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     private val _brightness = MutableStateFlow(1.0f)
     val brightness: StateFlow<Float> = _brightness.asStateFlow()
 
+    /** 繁简转换模式："none"=原样 / "t2s"=繁→简 / "s2t"=简→繁（按书持久化）。 */
+    private val _chineseConversion = MutableStateFlow("none")
+    val chineseConversion: StateFlow<String> = _chineseConversion.asStateFlow()
+
     /** Guards against reloading the same book when composable is recomposed. */
     private var loadedBookId: Long? = null
 
@@ -306,6 +311,10 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val b = bookRepository.getBookById(bookId)
             _book.value = b
+            // 读回该书的繁简转换偏好（在打开前设定，供 openPublication 决定是否生成转换副本）
+            _chineseConversion.value = getApplication<Application>()
+                .getSharedPreferences("reader_prefs", Context.MODE_PRIVATE)
+                .getString("reader_conversion_$bookId", "none") ?: "none"
             readingStartTime = System.currentTimeMillis()
             if (b != null) {
                 openPublication(b)
@@ -319,6 +328,15 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                 _annotations.value = it
                 refreshDecorations()
             }
+        }
+        // 阅读时后台生成向量索引（分块 + 向量化），供「与书对话」的 RAG 检索使用。
+        // ensureIndexed 已含「有当前索引就跳过」的短路；两者都在 IO 线程，不阻塞阅读。
+        viewModelScope.launch {
+            try {
+                val repo = Injector.chatRepository()
+                repo.ensureIndexed(bookId)
+                repo.ensureEmbedded(bookId)
+            } catch (_: Exception) {}
         }
     }
 
@@ -360,6 +378,14 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
                     if (siblingTxt.exists()) {
                         actualPath = BookImporter(app).ensureEpub(siblingTxt).absolutePath
                     }
+                }
+
+                // 繁简转换：若启用，先生成（或复用）转换后的 EPUB 副本，再打开该副本。
+                val convMode = _chineseConversion.value
+                if ((convMode == "t2s" || convMode == "s2t") && actualPath.endsWith(".epub", ignoreCase = true)) {
+                    actualPath = BookImporter(app)
+                        .convertEpubChinese(File(actualPath), toSimplified = convMode == "t2s")
+                        .absolutePath
                 }
 
                 val file = File(actualPath)
@@ -610,6 +636,18 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         val indexByHrefKey = HashMap<String, Int>()
         for ((idx, link) in readingOrder.withIndex()) {
             indexByHrefKey.putIfAbsent(tocHrefKey(link.url().toString()), idx)
+        }
+        // 无导航目录的书（Readium 解析不到 tableOfContents，如某些繁体竖排 EPUB）：
+        // 退化为按 readingOrder 逐文件建目录，保证「目录」始终有内容，而不是显示「无目录」。
+        if (links.isEmpty() && readingOrder.isNotEmpty()) {
+            return readingOrder.mapIndexed { idx, link ->
+                TocItem(
+                    title = link.title?.trim()?.takeIf { it.isNotBlank() } ?: "第${idx + 1}章",
+                    href = link.url().toString(),
+                    level = 0,
+                    readingOrderIndex = idx,
+                )
+            }
         }
         return buildTocListInner(links, level, indexByHrefKey)
     }
@@ -1116,6 +1154,10 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         return base + ReflowableWebPreferences(
             fontSize = _fontSize.value,
             scroll = _scrollMode.value,
+            // 强制横排 + 左起：部分繁体书元数据带 CJK + RTL，Readium 会据此自动启用竖排。
+            // 这里显式关闭竖排并锁定 LTR，让所有书都按普通横向排版，避免繁体右起竖排。
+            verticalText = false,
+            readingProgression = ReadingProgression.LTR,
         )
     }
 
@@ -1176,6 +1218,32 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         getApplication<Application>()
             .getSharedPreferences("reader_prefs", Context.MODE_PRIVATE)
             .edit().putFloat("reader_brightness", _brightness.value).apply()
+    }
+
+    /** 一键繁简转换：持久化当前进度 → 记录模式 → 重新打开书籍（打开时生成/复用转换副本）。 */
+    fun applyChineseConversion(mode: String) {
+        if (mode != "none" && mode != "t2s" && mode != "s2t") return
+        val book = _book.value ?: return
+        if (mode == _chineseConversion.value) return
+        val app = getApplication<Application>()
+        val locatorJson = getCurrentLocatorJson()
+        val page = _currentPageIndex.value
+        val total = _totalPages.value
+        viewModelScope.launch(Dispatchers.IO) {
+            // 先落库当前阅读位置，保证重新打开后能恢复（loadBook 会从 DB 读 currentLocator/currentPage）
+            try {
+                bookRepository.updateReadingProgress(book.id, page, total, locatorJson, System.currentTimeMillis())
+            } catch (_: Exception) {}
+            withContext(Dispatchers.Main) {
+                _chineseConversion.value = mode
+                app.getSharedPreferences("reader_prefs", Context.MODE_PRIVATE)
+                    .edit().putString("reader_conversion_${book.id}", mode).apply()
+                activePublication?.close()
+                activePublication = null
+                loadedBookId = null
+                loadBook(book.id)
+            }
+        }
     }
 
     /** 阅读页回到前台时调用：重置计时起点，避免聊天等停留时间被算进阅读时长。 */

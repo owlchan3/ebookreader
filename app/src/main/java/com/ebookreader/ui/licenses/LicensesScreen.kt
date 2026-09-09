@@ -1,28 +1,13 @@
 package com.ebookreader.ui.licenses
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -31,70 +16,92 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-data class LicenseItem(
-    val name: String,
-    val description: String,
-    val license: String,
-    val licenseText: String,
-)
+// 开源许可：纯文本展示（可长按选中复制），无卡片、无分割线。
 
-data class LicenseGroup(
-    val category: String,
-    val items: List<LicenseItem>,
-)
+private val licenseListing = """
+开源许可
 
-val licenseGroups = listOf(
-    LicenseGroup("Readium ToolKit", listOf(
-        LicenseItem("readium-shared", "Readium 共享核心库", "BSD-3-Clause", BSD3_LICENSE),
-        LicenseItem("readium-streamer", "出版物解析与流式传输", "BSD-3-Clause", BSD3_LICENSE),
-        LicenseItem("readium-navigator", "阅读导航器核心", "BSD-3-Clause", BSD3_LICENSE),
-        LicenseItem("readium-navigator-web-reflowable", "Web 重排式阅读导航器", "BSD-3-Clause", BSD3_LICENSE),
-        LicenseItem("readium-navigator-web-fixedlayout", "Web 固定布局阅读导航器", "BSD-3-Clause", BSD3_LICENSE),
-        LicenseItem("readium-adapter-pdfium", "PDFium 适配器（文档+导航器）", "BSD-3-Clause", BSD3_LICENSE),
-        LicenseItem("readium-opds", "OPDS 目录解析", "BSD-3-Clause", BSD3_LICENSE),
-        LicenseItem("readium-lcp", "LCP DRM 支持", "BSD-3-Clause", BSD3_LICENSE),
-    )),
-    LicenseGroup("AndroidX & Jetpack", listOf(
-        LicenseItem("androidx-core-ktx", "Android 核心扩展库", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("androidx-activity-compose", "Activity Compose 集成", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("androidx-lifecycle", "生命周期管理（运行时 + ViewModel）", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("androidx-navigation-compose", "Compose 导航组件", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("androidx-room", "SQLite 对象映射库（运行时 + KTX + 编译器）", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("androidx-datastore-preferences", "键值对数据持久化", "Apache 2.0", APACHE2_LICENSE),
-    )),
-    LicenseGroup("Compose UI", listOf(
-        LicenseItem("compose-ui", "Compose UI 核心（动画/基础/材质/UI/图形）", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("compose-material3", "Material Design 3 组件库", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("compose-material-icons-extended", "Material 图标扩展集", "Apache 2.0", APACHE2_LICENSE),
-    )),
-    LicenseGroup("Kotlin 生态", listOf(
-        LicenseItem("kotlin-stdlib", "Kotlin 标准库", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("kotlinx-coroutines", "Kotlin 协程库（Core + Android）", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("kotlinx-serialization-json", "Kotlin JSON 序列化", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("kotlinx-datetime", "Kotlin 多平台日期时间", "Apache 2.0", APACHE2_LICENSE),
-    )),
-    LicenseGroup("第三方库", listOf(
-        LicenseItem("OkHttp", "HTTP 客户端，用于 AI API 通信", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("Okio", "OkHttp/Coil 依赖的 I/O 库", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("Coil", "Compose 图片加载库", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("Jsoup", "HTML 解析器，用于网页抓取", "MIT", MIT_LICENSE),
-        LicenseItem("Timber", "日志工具库", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("AndroidPdfViewer", "PDF 阅读器组件", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("PdfiumAndroid", "PDFium 的 Android 原生封装", "Apache 2.0", APACHE2_LICENSE),
-        LicenseItem("PDFium", "Chromium 的 PDF 渲染引擎", "BSD-3-Clause", BSD3_LICENSE),
-        LicenseItem("desugar_jdk_libs", "Java 8+ API 支持库（Desugar）", "GPL-2.0 with Classpath Exception", GPL2_CLASSPATH_LICENSE),
-    )),
-)
+EBookReader 使用了以下开源软件与数据资源，特此致谢。
+各软件完整许可文本见文末附录，最终以各自官方许可文件为准。
+
+【Readium ToolKit · BSD-3-Clause 许可证】
+readium-shared —— Readium 共享核心库
+readium-streamer —— 出版物解析与流式传输
+readium-navigator —— 阅读导航器核心
+readium-navigator-web-reflowable —— Web 重排式阅读导航器
+readium-navigator-web-fixedlayout —— Web 固定布局阅读导航器
+readium-adapter-pdfium —— PDFium 适配器（文档与导航器）
+readium-opds —— OPDS 目录解析
+readium-lcp —— LCP DRM 支持
+
+【AndroidX 与 Jetpack · Apache License 2.0】
+androidx-core-ktx —— Android 核心扩展库
+androidx-activity-compose —— Activity Compose 集成
+androidx-lifecycle —— 生命周期管理（运行时与 ViewModel）
+androidx-navigation-compose —— Compose 导航组件
+androidx-room —— SQLite 对象映射库（运行时、KTX 与编译器）
+androidx-datastore-preferences —— 键值对数据持久化
+
+【Compose UI · Apache License 2.0】
+compose-runtime —— Compose 运行时
+compose-ui —— Compose UI 核心
+compose-ui-graphics —— Compose 图形
+compose-foundation —— Compose 基础布局与手势
+compose-animation —— Compose 动画
+compose-material —— Material Design 2 组件库
+compose-material3 —— Material Design 3 组件库
+compose-material-icons-extended —— Material 图标扩展集
+
+【Kotlin 生态 · Apache License 2.0】
+kotlin-stdlib —— Kotlin 标准库
+kotlinx-coroutines —— Kotlin 协程库（Core 与 Android）
+kotlinx-serialization-json —— Kotlin JSON 序列化
+kotlinx-datetime —— Kotlin 多平台日期时间
+
+【第三方库】
+OkHttp（Apache License 2.0）—— HTTP 客户端，用于 AI API 通信
+Okio（Apache License 2.0）—— OkHttp / Coil 依赖的 I/O 库
+Coil（Apache License 2.0）—— Compose 图片加载库
+Jsoup（MIT）—— HTML 解析器，用于网页抓取
+Timber（Apache License 2.0）—— 日志工具库
+AndroidPdfViewer（Apache License 2.0）—— PDF 阅读器组件
+PdfiumAndroid（Apache License 2.0）—— PDFium 的 Android 原生封装
+PDFium（BSD-3-Clause）—— Chromium 的 PDF 渲染引擎
+ONNX Runtime（MIT）—— 端侧向量嵌入与语义检索
+Apache POI（Apache License 2.0）—— .doc 老格式二进制提取文字
+OpenCC4j（Apache License 2.0）—— 词级繁简转换
+desugar_jdk_libs（GPL-2.0 with Classpath Exception）—— Java 8+ API 支持库
+
+【内置模型与数据资源】
+BGE 中文嵌入模型（bge-small-zh）—— MIT —— 端侧语义检索
+jieba 词典（jieba_dict / jieba_idf）—— MIT —— 中文分词与关键词提取
+ECDICT 英汉词典（ecdict.jsonl）—— MIT —— 离线英汉查询
+萌典（moedict.jsonl，教育部國語辭典）—— 以教育部授权为准 —— 离线中文查询
+停用词表（百度 / 哈工大 / 四川大学）、THUOCL 词表 —— 公开词表，出处各异 —— 停用词过滤与新词发现
+Xiu2 书源（official_sources.json / xiu2_shuyuan.json）—— 来源各异（Legado GPL-3.0）—— 网文搜索
+""".trimIndent()
+
+private val licenseAppendix = buildString {
+    appendLine("【附录：完整许可文本】")
+    appendLine()
+    appendLine("【Apache License 2.0】")
+    appendLine(APACHE2_LICENSE)
+    appendLine()
+    appendLine("【MIT License】")
+    appendLine(MIT_LICENSE)
+    appendLine()
+    appendLine("【BSD 3-Clause License】")
+    appendLine(BSD3_LICENSE)
+    appendLine()
+    appendLine("【GNU General Public License v2.0，with Classpath Exception】")
+    appendLine(GPL2_CLASSPATH_LICENSE)
+}
+
+private val licensePlainText = licenseListing + "\n\n" + licenseAppendix
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -112,80 +119,18 @@ fun LicensesScreen(onBack: () -> Unit) {
             )
         },
     ) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding).padding(16.dp)) {
-            licenseGroups.forEach { group ->
-                item(key = "header_${group.category}") {
-                    Text(
-                        group.category,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
-                    )
-                }
-                items(group.items, key = { "${group.category}_${it.name}" }) { item ->
-                    LicenseCard(item)
-                }
-            }
-            item {
-                Spacer(Modifier.height(32.dp))
-                Text(
-                    "以上为 EBookReader 使用的主要开源组件。如有遗漏，请以各组件官方许可文件为准。",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun LicenseCard(item: LicenseItem) {
-    var expanded by remember { mutableStateOf(false) }
-
-    Card(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-    ) {
-        Column {
-            Row(
-                Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    Icons.Default.Description, null, Modifier.size(20.dp),
-                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                )
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(item.name, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    Text(item.description, fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
-                }
-                Text(
-                    item.license, fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(end = 8.dp)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                )
-                Icon(
-                    if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    "展开/收起",
-                    Modifier.size(20.dp),
-                    tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
-                )
-            }
-            if (expanded) {
-                HorizontalDivider()
-                Text(
-                    item.licenseText,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                    modifier = Modifier.padding(12.dp),
-                )
-            }
+        SelectionContainer {
+            Text(
+                text = licensePlainText,
+                fontSize = 13.sp,
+                lineHeight = 20.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+            )
         }
     }
 }

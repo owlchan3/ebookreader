@@ -26,6 +26,9 @@ timber = "5.0.1"
 desugar_jdk_libs = "2.1.5"
 readium = "3.3.0"
 okhttp = "4.12.0"
+onnxruntime = "1.22.0"
+poi = "5.2.5"
+opencc4j = "1.14.0"
 
 [libraries]
 # AndroidX Core
@@ -81,6 +84,16 @@ desugar_jdk_libs = { group = "com.android.tools", name = "desugar_jdk_libs", ver
 
 # OkHttp
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+
+# On-device embedding (ONNX Runtime)
+onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
+
+# Apache POI（.doc 老格式二进制提取文字）
+poi = { group = "org.apache.poi", name = "poi", version.ref = "poi" }
+poi-scratchpad = { group = "org.apache.poi", name = "poi-scratchpad", version.ref = "poi" }
+
+# OpenCC4j（词级繁简转换，避免「皇后→皇後」类错误）
+opencc4j = { group = "com.github.houbb", name = "opencc4j", version.ref = "opencc4j" }
 
 
 # Readium (via includeBuild composite build)

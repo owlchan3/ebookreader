@@ -84,6 +84,43 @@ class BookRecommendClient(private val googleBooksApiKey: String = "") {
             }
         }
 
+    /** 抓取单卷完整信息（含完整分类 categories），用于「确认本书在该平台存在」后做定向关联。 */
+    suspend fun fetchGoogleBookDetail(id: String): OnlineBook? = withContext(Dispatchers.IO) {
+        try {
+            val keyParam = if (googleBooksApiKey.isNotBlank()) "&key=$googleBooksApiKey" else ""
+            val url = "https://www.googleapis.com/books/v1/volumes/$id$keyParam"
+            val response = client.newCall(Request.Builder().url(url).build()).execute()
+            if (!response.isSuccessful) return@withContext null
+            val vi = JSONObject(response.body?.string() ?: "").optJSONObject("volumeInfo") ?: return@withContext null
+            val title = vi.optString("title", "")
+            if (title.isBlank()) return@withContext null
+            val authors = vi.optJSONArray("authors")
+            val author = authors?.takeIf { it.length() > 0 }?.getString(0).orEmpty()
+            val cover = vi.optJSONObject("imageLinks")?.optString("thumbnail").orEmpty()
+            val rating = vi.optDouble("averageRating", -1.0)
+            val ratingsCount = vi.optInt("ratingsCount", 0)
+            val link = vi.optString("canonicalVolumeLink", "").ifBlank { "https://books.google.com/books?id=$id" }
+            val categories = vi.optJSONArray("categories")
+            val tags = if (categories != null) {
+                (0 until categories.length()).mapNotNull { categories.optString(it).takeIf { it.isNotBlank() } }
+            } else emptyList()
+            OnlineBook(
+                key = "gb:$id",
+                title = title,
+                author = author.ifBlank { "未知作者" },
+                coverUrl = cover.takeIf { it.isNotBlank() },
+                description = vi.optString("description", "").takeIf { it.isNotBlank() },
+                rating = if (rating > 0) String.format("%.1f", rating) else null,
+                link = link.takeIf { it.isNotBlank() },
+                source = "Google Books",
+                popularity = Math.log10(ratingsCount + 1.0),
+                tags = tags,
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /** Open Library 搜索（完全免费无认证）。 */
     suspend fun searchOpenLibrary(query: String, maxResults: Int = 5): List<OnlineBook> =
         withContext(Dispatchers.IO) {
@@ -205,6 +242,105 @@ class BookRecommendClient(private val googleBooksApiKey: String = "") {
                 emptyList()
             }
         }
+
+    /**
+     * 豆瓣图书搜索（官方网页搜索接口，无需密钥/Cookie）。SaltyLeo 已失效，用此作为豆瓣评分数据源。
+     * GET https://search.douban.com/book/subject_search?search_text=书名/作者，返回内嵌 JSON `window.__DATA__`。
+     * 每个结果含 title（可能带「 : 副标题」）、abstract（作者 / 出版社 / 年月 / 价格）、cover_url、
+     * rating.value（豆瓣 10 分制评分）、rating.count（评分人数）、url（详情页）。
+     */
+    suspend fun searchDouban(query: String, maxResults: Int = 10): List<OnlineBook> =
+        withContext(Dispatchers.IO) {
+            try {
+                val url = "https://search.douban.com/book/subject_search?search_text=" +
+                    URLEncoder.encode(query, "UTF-8")
+                val request = Request.Builder().url(url)
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36")
+                    .header("Referer", "https://book.douban.com/")
+                    .build()
+                val response = client.newCall(request).execute()
+                if (!response.isSuccessful) return@withContext emptyList()
+                val html = response.body?.string() ?: return@withContext emptyList()
+                val dataJson = extractDataJson(html) ?: return@withContext emptyList()
+                val root = JSONObject(dataJson)
+                val items = root.optJSONArray("items") ?: return@withContext emptyList()
+
+                buildList {
+                    for (i in 0 until minOf(items.length(), maxResults)) {
+                        val o = items.optJSONObject(i) ?: continue
+                        val title = o.optString("title", "").trim().substringBefore(" :").trim()
+                        if (title.isBlank()) continue
+                        val abstract = o.optString("abstract", "").trim()
+                        val parts = abstract.split("/").map { it.trim() }
+                        val author = parts.getOrNull(0)?.takeIf { it.isNotBlank() } ?: "未知作者"
+                        val publisher = parts.getOrNull(1)?.takeIf { it.isNotBlank() }
+                        val year = parts.getOrNull(2)?.takeIf { it.isNotBlank() && it != "0" }
+                        val price = parts.getOrNull(3)?.takeIf { it.isNotBlank() && it != "0" }
+                        val cover = o.optString("cover_url", "").takeIf { it.startsWith("http") }
+                            ?.let { if (it.startsWith("http://")) "https://" + it.removePrefix("http://") else it }
+                        val ratingObj = o.optJSONObject("rating")
+                        val rating = ratingObj?.optDouble("value", -1.0)?.takeIf { it > 0 }
+                        val ratingCount = ratingObj?.optInt("count", 0) ?: 0
+                        val link = o.optString("url", "").takeIf { it.isNotBlank() }
+                        val id = o.optLong("id", 0L)
+
+                        val description = listOfNotNull(
+                            publisher?.let { "出版 $it" },
+                            year,
+                            price?.let { "¥$it" },
+                        ).joinToString(" · ").takeIf { it.isNotBlank() }
+
+                        add(
+                            OnlineBook(
+                                key = "db:$id",
+                                title = title,
+                                author = author,
+                                coverUrl = cover,
+                                description = description,
+                                rating = rating?.let { String.format("%.1f", it) },
+                                link = link,
+                                source = "豆瓣",
+                                popularity = Math.log10(ratingCount + 1.0),
+                                tags = emptyList(),
+                            )
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+
+    /** 从豆瓣搜索页 HTML 中提取 `window.__DATA__ = {...}` 的 JSON 文本（括号配对，兼容内部嵌套）。 */
+    private fun extractDataJson(html: String): String? {
+        val marker = "window.__DATA__ = "
+        val start = html.indexOf(marker)
+        if (start < 0) return null
+        var i = start + marker.length
+        while (i < html.length && html[i] != '{') i++
+        if (i >= html.length) return null
+        var depth = 0
+        var inStr = false
+        var escape = false
+        for (j in i until html.length) {
+            val c = html[j]
+            if (inStr) {
+                if (escape) escape = false
+                else if (c == '\\') escape = true
+                else if (c == '"') inStr = false
+            } else {
+                when (c) {
+                    '"' -> inStr = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return html.substring(i, j + 1)
+                    }
+                }
+            }
+        }
+        return null
+    }
 
     private fun parseResultArray(body: String): org.json.JSONArray? {
         try {

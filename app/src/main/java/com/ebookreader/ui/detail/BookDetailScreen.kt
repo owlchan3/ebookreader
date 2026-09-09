@@ -1,5 +1,7 @@
 package com.ebookreader.ui.detail
 
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -27,16 +29,19 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.filled.SyncAlt
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
@@ -45,6 +50,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -75,6 +82,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -86,6 +95,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.ebookreader.domain.model.Book
+import com.ebookreader.ui.recommend.RecommendationItem
 import com.ebookreader.ui.theme.readTagChipColors
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -122,6 +132,10 @@ fun BookDetailScreen(
     val hasDecomposition by viewModel.hasDecomposition.collectAsState()
     val decomposeStatus by viewModel.decomposeStatus.collectAsState()
     val existingDecomposeBookType by viewModel.existingDecomposeBookType.collectAsState()
+    val keywords by viewModel.keywords.collectAsState()
+    val isGeneratingKeywords by viewModel.isGeneratingKeywords.collectAsState()
+    val recommendations by viewModel.recommendations.collectAsState()
+    val isGeneratingRecommendations by viewModel.isGeneratingRecommendations.collectAsState()
 
     LaunchedEffect(isDeleted) { if (isDeleted) onBack() }
 
@@ -130,18 +144,42 @@ fun BookDetailScreen(
     var showEditDialog by remember { mutableStateOf(false) }
     var showEnlargeCover by remember { mutableStateOf(false) }
     var showDecomposeDialog by remember { mutableStateOf(false) }
+    var showKeywords by remember { mutableStateOf(false) }
+    var showRecommend by remember { mutableStateOf(false) }
+    val recommendEnabled = remember { viewModel.isRecommendEnabled() }
+    var showMenu by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val coverMessage by viewModel.coverMessage.collectAsState()
+    val updateMessage by viewModel.updateMessage.collectAsState()
+    val keywordMessage by viewModel.keywordMessage.collectAsState()
+    val isUpdating by viewModel.isUpdating.collectAsState()
     val readTagColors = readTagChipColors()
 
     val coverPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri -> uri?.let { viewModel.updateCover(it) } }
 
+    val updateFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { viewModel.updateBook(it) } }
+
     LaunchedEffect(coverMessage) {
         coverMessage?.let {
             snackbarHostState.showSnackbar(it)
             viewModel.clearCoverMessage()
+        }
+    }
+    LaunchedEffect(updateMessage) {
+        updateMessage?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearUpdateMessage()
+        }
+    }
+    LaunchedEffect(keywordMessage) {
+        keywordMessage?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearKeywordMessage()
         }
     }
 
@@ -154,7 +192,20 @@ fun BookDetailScreen(
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") } },
                 actions = {
                     IconButton(onClick = { showEditDialog = true }) { Icon(Icons.Default.Edit, contentDescription = "编辑") }
-                    IconButton(onClick = { showDeleteDialog = true }) { Icon(Icons.Default.Delete, contentDescription = "删除") }
+                    Box {
+                        IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.Menu, contentDescription = "更多") }
+                        DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("更新") },
+                                onClick = { showMenu = false; updateFilePicker.launch(arrayOf("*/*")) },
+                                enabled = !isUpdating,
+                            )
+                            DropdownMenuItem(
+                                text = { Text("删除") },
+                                onClick = { showMenu = false; showDeleteDialog = true },
+                            )
+                        }
+                    }
                 },
             )
         },
@@ -262,71 +313,174 @@ fun BookDetailScreen(
                 Text(currentBook.description, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f))
             }
 
-            // Tags
+            // Tags / Keywords（切换按钮在「添加标签」旁，点击在标签与关键词之间切换）
             Spacer(Modifier.height(20.dp)); HorizontalDivider(); Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth()) {
-                Text("标签", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (showKeywords) "关键词" else "标签", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = { showNewTagDialog = true }, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.Add, "新建标签", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                TextButton(onClick = { showKeywords = !showKeywords }) {
+                    Icon(Icons.Filled.SyncAlt, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (showKeywords) "标签" else "关键词")
                 }
-            }
-            Spacer(Modifier.height(8.dp))
-            FlowRow {
-                val sortedTags = allTags.sortedByDescending { tags.any { selected -> selected.id == it.id } }
-                sortedTags.forEach { tag ->
-                    key(tag.id) {
-                        val isSelected = tags.any { it.id == tag.id }
-                        FilterChip(
-                            selected = isSelected,
-                            onClick = {
-                                if (isSelected) viewModel.removeTag(tag.id)
-                                else viewModel.addTag(tag.id)
-                            },
-                            label = { Text(tag.name) },
-                            colors = if (tag.isReadTag) {
-                                FilterChipDefaults.filterChipColors(
-                                    containerColor = readTagColors.container,
-                                    labelColor = readTagColors.label,
-                                    selectedContainerColor = readTagColors.selectedContainer,
-                                    selectedLabelColor = readTagColors.selectedLabel,
-                                )
-                            } else FilterChipDefaults.filterChipColors(),
-                            modifier = Modifier.padding(end = 8.dp, bottom = 4.dp),
-                        )
+                if (!showKeywords) {
+                    IconButton(onClick = { showNewTagDialog = true }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Add, "新建标签", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
                     }
                 }
             }
-            if (allTags.isEmpty() && tags.isEmpty()) {
-                Text("点击 + 新建标签", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+            Spacer(Modifier.height(8.dp))
+            if (showKeywords) {
+                when {
+                    isGeneratingKeywords -> {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Text(
+                                "正在提取关键词…",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            )
+                        }
+                    }
+                    keywords.isEmpty() -> {
+                        Column {
+                            OutlinedButton(onClick = { viewModel.generateKeywords() }) {
+                                Icon(Icons.Default.Cloud, null, Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("生成关键词")
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "本地统计 + AI 语义提取本书关键词（首次生成约需数秒）",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                            )
+                        }
+                    }
+                    else -> {
+                        WordCloud(keywords = keywords)
+                        Spacer(Modifier.height(4.dp))
+                        TextButton(onClick = { viewModel.generateKeywords() }) {
+                            Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("重新生成")
+                        }
+                    }
+                }
+            } else {
+                FlowRow {
+                    val sortedTags = allTags.sortedByDescending { tags.any { selected -> selected.id == it.id } }
+                    sortedTags.forEach { tag ->
+                        key(tag.id) {
+                            val isSelected = tags.any { it.id == tag.id }
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = {
+                                    if (isSelected) viewModel.removeTag(tag.id)
+                                    else viewModel.addTag(tag.id)
+                                },
+                                label = { Text(tag.name) },
+                                colors = if (tag.isReadTag || tag.isPinTag) {
+                                    FilterChipDefaults.filterChipColors(
+                                        containerColor = readTagColors.container,
+                                        labelColor = readTagColors.label,
+                                        selectedContainerColor = readTagColors.selectedContainer,
+                                        selectedLabelColor = readTagColors.selectedLabel,
+                                    )
+                                } else FilterChipDefaults.filterChipColors(),
+                                modifier = Modifier.padding(end = 8.dp, bottom = 4.dp),
+                            )
+                        }
+                    }
+                }
+                if (allTags.isEmpty() && tags.isEmpty()) {
+                    Text("点击 + 新建标签", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                }
             }
 
-            // Related Books
+            // Related Books / 推荐书籍（切换按钮，仿标签/关键词切换）
             Spacer(Modifier.height(20.dp))
             HorizontalDivider()
             Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth()) {
-                Text("相关书籍", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (showRecommend) "推荐书籍" else "相关书籍", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = { viewModel.showAddRelatedDialog() }, modifier = Modifier.size(32.dp)) {
-                    Icon(Icons.Default.Add, "添加相关书籍", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                if (recommendEnabled) {
+                    TextButton(onClick = {
+                        showRecommend = !showRecommend
+                        if (showRecommend) viewModel.ensureRecommendations()
+                    }) {
+                        Icon(Icons.Filled.SyncAlt, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (showRecommend) "相关书籍" else "推荐书籍")
+                    }
+                }
+                if (!showRecommend) {
+                    IconButton(onClick = { viewModel.showAddRelatedDialog() }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Add, "添加相关书籍", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                    }
                 }
             }
             Spacer(Modifier.height(8.dp))
-            if (relatedBooks.isEmpty()) {
-                Text("点击 + 添加相关书籍", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+            if (showRecommend) {
+                when {
+                    isGeneratingRecommendations -> {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Text("正在生成推荐…", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+                        }
+                    }
+                    recommendations.isEmpty() -> {
+                        Text("暂无推荐，多读几本或补充标签/简介后再试", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                    }
+                    else -> {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            recommendations.forEach { item ->
+                                key(item.dismissKey) {
+                                    RecommendationRow(
+                                        item = item,
+                                        onClick = {
+                                            if (item.isLocal) {
+                                                onBookClick(item.bookId)
+                                            } else {
+                                                item.link?.let { url ->
+                                                    runCatching {
+                                                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    relatedBooks.forEach { related ->
-                        key(related.id) {
-                            RelatedBookCard(
-                                book = related,
-                                onClick = { onBookClick(related.id) },
-                                onRemove = { viewModel.removeRelatedBook(related.id) },
-                            )
+                if (relatedBooks.isEmpty()) {
+                    Text("点击 + 添加相关书籍", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                } else {
+                    Row(
+                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        relatedBooks.forEach { related ->
+                            key(related.id) {
+                                RelatedBookCard(
+                                    book = related,
+                                    onClick = { onBookClick(related.id) },
+                                    onRemove = { viewModel.removeRelatedBook(related.id) },
+                                )
+                            }
                         }
                     }
                 }
@@ -567,6 +721,67 @@ private fun RelatedBookCard(
                 Modifier.size(14.dp),
                 tint = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
             )
+        }
+    }
+}
+
+@Composable
+private fun RecommendationRow(item: RecommendationItem, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Row(Modifier.fillMaxWidth().clickable { onClick() }.padding(12.dp)) {
+            Box(
+                Modifier.width(56.dp).aspectRatio(0.7f).clip(RoundedCornerShape(6.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (item.cover != null) {
+                    AsyncImage(
+                        model = item.cover,
+                        contentDescription = item.title,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                    )
+                } else {
+                    Icon(Icons.AutoMirrored.Filled.MenuBook, null, Modifier.size(28.dp),
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        item.title,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        if (item.isLocal) "本地" else item.source.ifBlank { "联网" },
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
+                }
+                if (item.author.isNotBlank()) {
+                    Text(item.author, fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), maxLines = 1)
+                }
+                if (item.reason.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(item.reason, fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (item.description.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(item.description, fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                        maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
     }
 }

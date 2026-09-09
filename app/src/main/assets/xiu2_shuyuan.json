@@ -1,0 +1,102 @@
+[
+  {
+    "sourceName": "速读谷",
+    "baseUrl": "https://www.sudugu.co",
+    "searchUrl": "/modules/article/search.php,{'method':'post','body':'searchkey={{key}}&action=login&searchtype=all&submit='}",
+    "bookList": "class.bookbox",
+    "nameRule": "tag.a.0@text",
+    "authorRule": "class.author.0@text##作者：",
+    "coverRule": "",
+    "urlRule": "tag.a.0@href"
+  },
+  {
+    "sourceName": "得奇小说网",
+    "baseUrl": "https://www.deqixs.com",
+    "searchUrl": "/tag/?key={{key}}",
+    "bookList": "class.item",
+    "nameRule": "tag.h3.0@tag.a.0@text",
+    "authorRule": "tag.p.1@tag.a.0@text##作者：",
+    "coverRule": "tag.img.0@src",
+    "urlRule": "tag.a.0@href"
+  },
+  {
+    "sourceName": "快书网",
+    "baseUrl": "https://www.kuaishu5.com",
+    "searchUrl": "/search/?searchkey={{key}}",
+    "bookList": "class.item",
+    "nameRule": "tag.h3.0@tag.a.0@text",
+    "authorRule": "tag.p.1@tag.a.0@text##作者：",
+    "coverRule": "tag.img.0@src",
+    "urlRule": "tag.a.0@href"
+  },
+  {
+    "sourceName": "天天看小说",
+    "baseUrl": "https://cn.ttkan.co",
+    "searchUrl": "/novel/search?q={{key}}",
+    "bookList": "class.novel_cell",
+    "nameRule": "tag.h3.0@text",
+    "authorRule": "tag.li.1@text",
+    "coverRule": "tag.amp-img.0@src",
+    "urlRule": "tag.a.0@href"
+  },
+  {
+    "sourceName": "手机小说",
+    "baseUrl": "https://www.shoujix.com",
+    "searchUrl": "/modules/article/search.php,{'charset':'gbk','body':'searchkey={{key}}','method':'POST'}",
+    "bookList": "class.novel-item",
+    "nameRule": "tag.img.0@alt",
+    "authorRule": "class.novel-author.0@text",
+    "coverRule": "tag.img.0@src",
+    "urlRule": "tag.a.0@href"
+  },
+  {
+    "sourceName": "艾途小说",
+    "baseUrl": "https://m.aitbooks.com",
+    "searchUrl": "/search/,{'method': 'POST','body': 'keyword={{key}}'}",
+    "bookList": ".search-card",
+    "nameRule": "a.0@text##\\-.*|\\_.*|\\s.*",
+    "authorRule": "a.1@text##的小说",
+    "coverRule": "",
+    "urlRule": "a.0@href"
+  },
+  {
+    "sourceName": "就爱文学",
+    "baseUrl": "http://www.92xs.info",
+    "searchUrl": "/modules/article/search.php,{'method':'post','body':'searchtype=articlename=author&searchkey={{key}}'}",
+    "bookList": "#author@tbody@tr!0",
+    "nameRule": ".odd.0@text",
+    "authorRule": ".odd.1@text",
+    "coverRule": "a.0@href##.*/(\\d+)(\\d+)(\\d+)(\\d+).*##/files/article/image/$1/$1$2$3$4/$1$2$3$4s.jpg",
+    "urlRule": "a.0@href##.com/##.la/"
+  },
+  {
+    "sourceName": "武林中文网",
+    "baseUrl": "https://www.50zw.so",
+    "searchUrl": "/search.html,{'method':'POST','body':'s={{key}}'}",
+    "bookList": "class.txt-list.0@tag.li",
+    "nameRule": "tag.a.0@text",
+    "authorRule": "class.s3.0@tag.a.0@text",
+    "coverRule": "",
+    "urlRule": "tag.a.0@href"
+  },
+  {
+    "sourceName": "铅笔小说",
+    "baseUrl": "https://www.23qb.com",
+    "searchUrl": "/search.html?searchkey={{key}}",
+    "bookList": "class.module-search-item",
+    "nameRule": "tag.a.0@title",
+    "authorRule": "",
+    "coverRule": "tag.img.0@data-src",
+    "urlRule": "tag.a.0@href"
+  },
+  {
+    "sourceName": "阅友小说",
+    "baseUrl": "http://m.suixkan.com",
+    "searchUrl": "/s/1.html?keyword={{key}}&page={{page}}",
+    "bookList": ".v-list-item",
+    "nameRule": ".v-title@text",
+    "authorRule": ".v-author@text##\\s",
+    "coverRule": "img@src",
+    "urlRule": ""
+  }
+]

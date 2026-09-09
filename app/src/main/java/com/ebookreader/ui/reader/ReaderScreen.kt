@@ -194,6 +194,7 @@ fun ReaderScreen(
     val themeKey by viewModel.themeKey.collectAsState()
     val scrollMode by viewModel.scrollMode.collectAsState()
     val brightness by viewModel.brightness.collectAsState()
+    val chineseConversion by viewModel.chineseConversion.collectAsState()
     val searchQuery by viewModel.searchQuery.collectAsState()
     val searchResults by viewModel.searchResults.collectAsState()
     val isSearching by viewModel.isSearching.collectAsState()
@@ -1422,6 +1423,13 @@ fun ReaderScreen(
                     TextButton(onClick = { viewModel.applyScrollMode(false) }) { Text("左右翻页") }
                     TextButton(onClick = { viewModel.applyScrollMode(true) }) { Text("上下滚动") }
                 }
+                Spacer(Modifier.height(16.dp)); HorizontalDivider(); Spacer(Modifier.height(12.dp))
+                Text("繁简转换", fontWeight = FontWeight.Medium); Spacer(Modifier.height(4.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ConversionChip("原样", chineseConversion == "none") { viewModel.applyChineseConversion("none") }
+                    ConversionChip("繁→简", chineseConversion == "t2s") { viewModel.applyChineseConversion("t2s") }
+                    ConversionChip("简→繁", chineseConversion == "s2t") { viewModel.applyChineseConversion("s2t") }
+                }
                 Spacer(Modifier.height(32.dp))
             }
         }
@@ -1475,6 +1483,21 @@ private fun ThemeChip(
             Box(Modifier.fillMaxSize().background(fg.copy(alpha = 0.15f), RoundedCornerShape(17.dp)))
         }
         Text(label, fontSize = 10.sp, modifier = Modifier.padding(top = 4.dp))
+    }
+}
+
+@Composable
+private fun ConversionChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    TextButton(onClick = onClick) {
+        Text(
+            label,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+        )
     }
 }
 

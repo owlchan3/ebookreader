@@ -20,6 +20,11 @@ import com.ebookreader.data.importer.mobi.MobiChapter
 import com.ebookreader.data.importer.mobi.MobiImage
 import com.ebookreader.data.importer.mobi.parseMobi
 import timber.log.Timber
+import com.github.houbb.opencc4j.util.ZhConverterUtil
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Node
+import org.jsoup.nodes.TextNode
+import org.jsoup.select.NodeVisitor
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -100,8 +105,10 @@ class BookImporter(private val context: Context) {
             }
             fixed
         } else if (extension == "doc") {
-            // Legacy .doc not supported without Apache POI
-            return Result.failure(Exception("暂不支持 .doc 格式，请转换为 .docx 或 .txt 后再导入"))
+            // 老 .doc（OLE2 二进制）：用 Apache POI 提取纯文字 → 存 .txt → 走 TXT 管线（只保留文字）
+            val epubFile = convertDocToTxt(destFile)
+            destFile.delete()
+            epubFile
         } else if (extension == "mobi" || extension == "azw" || extension == "azw3") {
             // MOBI/AZW3 → EPUB：解析 mobi7 正文 → 章节 → EPUB（删除原文件，保留生成的 EPUB）
             val epubFile = convertMobiToEpub(destFile)
@@ -781,6 +788,139 @@ $metaCreator$metaDescription  </metadata>
         return paragraphs
     }
 
+    // ── DOC → TXT → EPUB conversion ─────────────────────────────────────
+
+    /**
+     * 从老 .doc（OLE2 二进制）提取纯文字 → 存 .txt → 走 TXT 管线转 EPUB。
+     * 只保留文字，丢弃所有排版/图片/页眉页脚（用户要求「只保留文字」）。
+     */
+    private fun convertDocToTxt(docFile: File): File {
+        val paragraphs = readDoc(docFile)
+        if (paragraphs.isEmpty()) throw Exception("无法从 DOC 文件中提取文本内容")
+        val fullText = paragraphs.joinToString("\n\n")
+        val txtFile = File(docFile.parentFile, "${docFile.nameWithoutExtension}.txt")
+        txtFile.writeText(fullText, Charsets.UTF_8)
+        return convertTxtToEpub(txtFile)
+    }
+
+    /**
+     * 用 Apache POI HWPF 读取 .doc 正文纯文字（按段落/换行拆分）。
+     * POI 的 WordExtractor 会正确处理 piece table 与多字节编码（GBK/Big5/UTF-16），
+     * 比手写 OLE2 解析可靠得多。
+     */
+    private fun readDoc(file: File): List<String> {
+        return try {
+            val doc = org.apache.poi.hwpf.HWPFDocument(java.io.FileInputStream(file))
+            val extractor = org.apache.poi.hwpf.extractor.WordExtractor(doc)
+            try {
+                extractor.text
+                    .split('\r', '\n')
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+            } finally {
+                extractor.close()
+                doc.close()
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to read DOC file")
+            throw Exception("无法读取 DOC 文件: ${e.message}")
+        }
+    }
+
+    // ── 繁简转换（生成 EPUB 副本）────────────────────────────────────────
+
+    /**
+     * 生成繁/简转换后的 EPUB 副本：只转换 XHTML/HTML 的文本节点，保留标签/样式/图片/目录结构。
+     * 结果按「源文件 + 转换方向」缓存（同名 .t2s.epub / .s2t.epub），重复调用直接复用。
+     *
+     * @param toSimplified true=繁→简，false=简→繁
+     */
+    fun convertEpubChinese(epubFile: File, toSimplified: Boolean): File {
+        val suffix = if (toSimplified) "t2s" else "s2t"
+        val outFile = File(epubFile.parentFile, "${epubFile.nameWithoutExtension}.$suffix.epub")
+        if (outFile.exists() && outFile.lastModified() >= epubFile.lastModified()) {
+            return outFile
+        }
+
+        fun isHtmlEntry(name: String): Boolean {
+            val lower = name.lowercase()
+            return lower.endsWith(".xhtml") || lower.endsWith(".html") || lower.endsWith(".htm")
+        }
+
+        val tmp = File(outFile.parentFile, "${outFile.name}.tmp")
+        try {
+            java.util.zip.ZipFile(epubFile).use { zin ->
+                ZipOutputStream(FileOutputStream(tmp)).use { zout ->
+                    val entries = zin.entries()
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        var data = zin.getInputStream(entry).readBytes()
+                        if (isHtmlEntry(entry.name)) {
+                            val text = String(data, Charsets.UTF_8)
+                            val converted = convertXhtmlText(text, toSimplified)
+                            if (converted != text) data = converted.toByteArray(Charsets.UTF_8)
+                        }
+                        val newEntry = ZipEntry(entry.name)
+                        if (entry.time >= 0) newEntry.time = entry.time
+                        newEntry.comment = entry.comment
+                        newEntry.extra = entry.extra
+                        if (entry.method == ZipEntry.STORED) {
+                            newEntry.method = ZipEntry.STORED
+                            newEntry.size = data.size.toLong()
+                            newEntry.compressedSize = data.size.toLong()
+                            newEntry.crc = CRC32().also { it.update(data) }.value
+                        }
+                        zout.putNextEntry(newEntry)
+                        zout.write(data)
+                        zout.closeEntry()
+                    }
+                }
+            }
+            if (!tmp.renameTo(outFile)) {
+                tmp.copyTo(outFile, overwrite = true)
+                tmp.delete()
+            }
+            return outFile
+        } catch (e: Exception) {
+            tmp.delete()
+            throw Exception("繁简转换失败: ${e.message}")
+        }
+    }
+
+    /** 转换单个 XHTML/HTML 文本：只改文本节点，保留标签/属性/结构（跳过 script/style 内容）。 */
+    private fun convertXhtmlText(html: String, toSimplified: Boolean): String {
+        val doc = Jsoup.parse(html, "", org.jsoup.parser.Parser.xmlParser())
+        doc.traverse(object : NodeVisitor {
+            override fun head(node: Node, depth: Int) {
+                if (node is TextNode) {
+                    val parentName = node.parent()?.nodeName()?.lowercase()
+                    if (parentName != "script" && parentName != "style") {
+                        val original = node.text()
+                        val converted = convertChinese(original, toSimplified)
+                        if (converted != original) node.text(converted)
+                    }
+                }
+            }
+            override fun tail(node: Node, depth: Int) {}
+        })
+        var out = doc.outerHtml()
+        // 源文件带 XML 声明时，Jsoup 的 XML 序列化可能丢掉它，手动补回，保证 WebView 按 XHTML 正常解析。
+        if (html.trimStart().startsWith("<?xml") && !out.trimStart().startsWith("<?xml")) {
+            out = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + out
+        }
+        return out
+    }
+
+    /** 单个文本片段的繁简转换；失败时原样返回，避免个别片段异常中断整本书。 */
+    private fun convertChinese(text: String, toSimplified: Boolean): String {
+        if (text.isBlank()) return text
+        return try {
+            if (toSimplified) ZhConverterUtil.toSimple(text) else ZhConverterUtil.toTraditional(text)
+        } catch (_: Exception) {
+            text
+        }
+    }
+
     // ── XML helpers ──────────────────────────────────────────────────────
 
     /**
@@ -1374,7 +1514,7 @@ $metaCreator$metaDescription$metaCover  </metadata>
 
     private fun detectFormat(extension: String) = when (extension.lowercase()) {
         "epub" -> "EPUB"; "pdf" -> "PDF"; "cbz" -> "CBZ"; "mobi" -> "MOBI"
-        "azw", "azw3" -> "AZW"; "txt" -> "TXT"; "docx" -> "DOCX"
+        "azw", "azw3" -> "AZW"; "txt" -> "TXT"; "docx" -> "DOCX"; "doc" -> "DOC"
         else -> extension.uppercase()
     }
 

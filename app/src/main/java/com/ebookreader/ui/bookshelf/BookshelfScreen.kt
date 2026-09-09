@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Sell
@@ -208,6 +209,9 @@ fun BookshelfScreen(
                             IconButton(onClick = { showBatchTagDialog = true }) {
                                 Icon(Icons.Default.Sell, "标签")
                             }
+                            IconButton(onClick = { viewModel.associateSelected() }) {
+                                Icon(Icons.Default.Link, "关联")
+                            }
                             IconButton(onClick = { showDeleteDialog = true }) {
                                 Icon(Icons.Default.Delete, "删除", tint = MaterialTheme.colorScheme.error)
                             }
@@ -319,7 +323,7 @@ fun BookshelfScreen(
                                                 selected = isSelected,
                                                 onClick = { viewModel.insertTagName(tag.name) },
                                                 label = { Text(tag.name, fontSize = 12.sp) },
-                                                colors = if (tag.isReadTag) {
+                                                colors = if (tag.isReadTag || tag.isPinTag) {
                                                     FilterChipDefaults.filterChipColors(
                                                         containerColor = readTagColors.container,
                                                         labelColor = readTagColors.label,
@@ -363,9 +367,6 @@ fun BookshelfScreen(
                                 DropdownMenuItem(
                                     text = { Text("按添加时间") },
                                     onClick = { viewModel.setSortMode(SortMode.DATE_ADDED); showSortMenu = false })
-                                DropdownMenuItem(
-                                    text = { Text("按格式") },
-                                    onClick = { viewModel.setSortMode(SortMode.FORMAT); showSortMenu = false })
                             }
                             IconButton(onClick = {
                                 filePickerLauncher.launch(arrayOf(
@@ -510,7 +511,7 @@ fun BookshelfScreen(
                             AssistChip(
                                 onClick = { viewModel.batchAddTag(tag.id) },
                                 label = { Text(tag.name, fontSize = 12.sp) },
-                                colors = if (tag.isReadTag) {
+                                colors = if (tag.isReadTag || tag.isPinTag) {
                                     AssistChipDefaults.assistChipColors(
                                         containerColor = readTagColors.container,
                                         labelColor = readTagColors.label,
@@ -534,7 +535,7 @@ fun BookshelfScreen(
                                 selected = false,
                                 onClick = { viewModel.batchRemoveTag(tag.id) },
                                 label = { Text(tag.name, fontSize = 12.sp) },
-                                colors = if (tag.isReadTag) {
+                                colors = if (tag.isReadTag || tag.isPinTag) {
                                     InputChipDefaults.inputChipColors(
                                         containerColor = readTagColors.container,
                                         labelColor = readTagColors.label,

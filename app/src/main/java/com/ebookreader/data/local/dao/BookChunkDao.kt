@@ -15,6 +15,14 @@ interface BookChunkDao {
     @Query("SELECT * FROM book_chunks WHERE bookId = :bookId ORDER BY chunkIndex ASC")
     suspend fun getChunksForBook(bookId: Long): List<BookChunkEntity>
 
+    /** 分页读取书籍索引块（关键词提取流式扫描用，避免整本正文一次载入导致 OOM）。 */
+    @Query("SELECT * FROM book_chunks WHERE bookId = :bookId ORDER BY chunkIndex ASC LIMIT :limit OFFSET :offset")
+    suspend fun getChunksForBookPaged(bookId: Long, limit: Int, offset: Int): List<BookChunkEntity>
+
+    /** 书籍正文总字符数（用于流式扫描前估算布隆过滤器容量）。 */
+    @Query("SELECT COALESCE(SUM(LENGTH(content)), 0) FROM book_chunks WHERE bookId = :bookId")
+    suspend fun getBookTotalChars(bookId: Long): Long
+
     @Query("SELECT id FROM book_chunks WHERE bookId = :bookId AND fileModified = :fileModified LIMIT 1")
     suspend fun hasCurrentIndex(bookId: Long, fileModified: Long): Long?
 

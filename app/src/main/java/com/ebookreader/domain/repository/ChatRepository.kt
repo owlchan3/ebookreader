@@ -26,7 +26,29 @@ interface ChatRepository {
     /** Get the total number of chunks for a book. */
     suspend fun getChunkCount(bookId: Long): Int
 
-    /** BM25 keyword search across chunks of specified books. Returns chunks sorted by relevance. */
+    /**
+     * Vectorize any chunks of [bookId] that don't have an embedding yet.
+     * Returns the number of chunks embedded in this call (0 when the model is
+     * unavailable or nothing is pending).
+     */
+    suspend fun ensureEmbedded(
+        bookId: Long,
+        onProgress: ((embedded: Int, total: Int, status: String) -> Unit)? = null,
+    ): Int
+
+    /** Re-embed specific chunks (e.g. after their event summary changed), REPLACE semantics. */
+    suspend fun reembedChunks(bookId: Long, chunkIds: List<Long>): Int
+
+    /** Number of chunks of [bookId] that already have an embedding (for readiness display). */
+    suspend fun getChunkEmbeddingCount(bookId: Long): Int
+
+    /** Human-readable embedding-model status (for the diagnostic panel). */
+    suspend fun embeddingModelStatus(): String
+
+    /** Embed arbitrary texts into L2-normalized vectors (empty list when the model is unavailable). */
+    suspend fun embedTexts(texts: List<String>): List<FloatArray>
+
+    /** Semantic/vector search across chunks of specified books, falling back to BM25. */
     suspend fun searchChunks(
         bookIds: Set<Long>,
         queries: List<String>,

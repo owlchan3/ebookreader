@@ -159,8 +159,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     }
 
     fun deleteTag(tag: Tag) {
-        // 「已阅」特殊标签不可删除
-        if (tag.isReadTag) return
+        // 「已阅」「置顶」特殊标签不可删除
+        if (tag.isReadTag || tag.isPinTag) return
         viewModelScope.launch { tagRepository.deleteTag(tag) }
     }
 

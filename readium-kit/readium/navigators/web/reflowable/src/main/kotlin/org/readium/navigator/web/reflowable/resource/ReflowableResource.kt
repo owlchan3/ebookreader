@@ -149,6 +149,12 @@ internal fun ReflowableResource(
         val showPlaceholder =
             remember(webViewState.webView) { mutableStateOf(true) }
 
+        // Whether the document has been loaded and sized (i.e. its scroll ranges are final).
+        // Until this is true, the initial progression move can silently no-op (WebView size 0),
+        // so we must keep the placeholder covering the content to avoid a first-page flash.
+        val documentSized =
+            remember(webViewState.webView) { mutableStateOf(false) }
+
         val paddingShift = DpOffset(padding.left, padding.top)
 
         val onSelectionApiChangedRef by rememberUpdatedRef(onSelectionApiChanged)
@@ -194,12 +200,27 @@ internal fun ReflowableResource(
                             // The document is loaded and sized; show it and settle the position.
                             // The scroll controller is created earlier in onCreated so it is never
                             // null even if this signal stalls (see the note there).
-                            showPlaceholder.value = false
-                            // Defer position settling by one message-loop turn so the native scroll
-                            // ranges catch up with the just-sized document.
-                            webView.post {
+                            documentSized.value = true
+                            // Settle the position only after Chromium's native scroll range in the
+                            // reading direction is final. The JS "sized" signal fires before the
+                            // native computeHorizontalScrollRange()/computeVerticalScrollRange()
+                            // catches up, and a move to a saved progression would then clamp to
+                            // scroll 0 (first page). Poll briefly until the range is non-zero.
+                            scope.launch {
+                                val controller = resourceState.scrollController.value
+                                if (controller != null) {
+                                    val deadline = System.currentTimeMillis() + 2000
+                                    while (System.currentTimeMillis() < deadline) {
+                                        val ready = when (orientation) {
+                                            Orientation.Vertical -> controller.maxScrollY > 0
+                                            Orientation.Horizontal -> controller.maxScrollX > 0
+                                        }
+                                        if (ready) break
+                                        delay(20)
+                                    }
+                                }
                                 val scrollController = resourceState.scrollController.value
-                                    ?: return@post
+                                    ?: return@launch
                                 when (val pending = resourceState.pendingLocation) {
                                     is ReflowableResourceLocation.HtmlId,
                                     is ReflowableResourceLocation.CssSelector,
@@ -220,6 +241,7 @@ internal fun ReflowableResource(
                                             direction = layoutDirection
                                         )
                                         onLocationChange()
+                                        showPlaceholder.value = false
                                     }
                                     null -> {
                                         scrollController.moveToProgression(
@@ -234,6 +256,7 @@ internal fun ReflowableResource(
                                             direction = layoutDirection
                                         )
                                         onLocationChange()
+                                        showPlaceholder.value = false
                                     }
                                 }
                             }
@@ -260,6 +283,10 @@ internal fun ReflowableResource(
                         resourceState.pendingLocation
                     }.onEach { pendingLocation ->
                         pendingLocation?.let {
+                            // 文档尺寸就绪前不要消费初始位置：此时原生滚动范围未就绪，
+                            // moveToProgression 会被钳制到 scroll 0（第一页），保存的进度就此丢失。
+                            // 初始位置交由 onDocumentLoadedAndSizedDelegate 在尺寸就绪后统一落位。
+                            if (!documentSized.value) return@let
                             showPlaceholder.value = true
 
                             when (pendingLocation) {
@@ -310,7 +337,7 @@ internal fun ReflowableResource(
                                 direction = layoutDirection
                             )
                             onLocationChange()
-                            showPlaceholder.value = false
+                            if (documentSized.value) showPlaceholder.value = false
                         }
                     }.launchIn(this)
                 }

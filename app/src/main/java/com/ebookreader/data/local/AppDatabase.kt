@@ -8,17 +8,21 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.ebookreader.data.local.dao.AnnotationDao
 import com.ebookreader.data.local.dao.BookDao
+import com.ebookreader.data.local.dao.BookKeywordDao
 import com.ebookreader.data.local.dao.BookmarkDao
 import com.ebookreader.data.local.dao.ChatDao
 import com.ebookreader.data.local.dao.TagDao
 import com.ebookreader.data.local.dao.BookChunkDao
 import com.ebookreader.data.local.dao.BookDecompositionDao
+import com.ebookreader.data.local.dao.ChunkEmbeddingDao
 import com.ebookreader.data.local.dao.DailyBookReadingDao
 import com.ebookreader.data.local.dao.DailyReadingSessionDao
 import com.ebookreader.data.local.entity.AnnotationEntity
 import com.ebookreader.data.local.entity.BookChunkEntity
 import com.ebookreader.data.local.entity.BookDecompositionEntity
+import com.ebookreader.data.local.entity.ChunkEmbeddingEntity
 import com.ebookreader.data.local.entity.BookEntity
+import com.ebookreader.data.local.entity.BookKeywordEntity
 import com.ebookreader.data.local.entity.BookRelationCrossRef
 import com.ebookreader.data.local.entity.BookTagCrossRef
 import com.ebookreader.data.local.entity.BookmarkEntity
@@ -43,20 +47,24 @@ import com.ebookreader.data.local.entity.TagGroupEntity
         ConversationEntity::class,
         ChatMessageEntity::class,
         BookChunkEntity::class,
+        ChunkEmbeddingEntity::class,
         DailyReadingSessionEntity::class,
         DailyBookReadingEntity::class,
         BookDecompositionEntity::class,
+        BookKeywordEntity::class,
     ],
-    version = 20,
+    version = 22,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun bookDao(): BookDao
+    abstract fun bookKeywordDao(): BookKeywordDao
     abstract fun tagDao(): TagDao
     abstract fun bookmarkDao(): BookmarkDao
     abstract fun annotationDao(): AnnotationDao
     abstract fun chatDao(): ChatDao
     abstract fun bookChunkDao(): BookChunkDao
+    abstract fun chunkEmbeddingDao(): ChunkEmbeddingDao
     abstract fun bookDecompositionDao(): BookDecompositionDao
     abstract fun dailyReadingSessionDao(): DailyReadingSessionDao
     abstract fun dailyBookReadingDao(): DailyBookReadingDao
@@ -255,6 +263,45 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                        chunkId INTEGER NOT NULL,
+                        bookId INTEGER NOT NULL,
+                        dim INTEGER NOT NULL,
+                        vector BLOB NOT NULL,
+                        PRIMARY KEY (chunkId),
+                        FOREIGN KEY (chunkId) REFERENCES book_chunks(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chunk_embeddings_bookId ON chunk_embeddings(bookId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chunk_embeddings_chunkId ON chunk_embeddings(chunkId)")
+            }
+        }
+
+        val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS book_keywords (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        bookId INTEGER NOT NULL,
+                        keyword TEXT NOT NULL,
+                        weight REAL NOT NULL,
+                        rank INTEGER NOT NULL,
+                        generatedTimestamp INTEGER NOT NULL,
+                        FOREIGN KEY (bookId) REFERENCES books(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_book_keywords_bookId ON book_keywords(bookId)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_book_keywords_bookId_keyword ON book_keywords(bookId, keyword)")
+            }
+        }
+
         // 降级迁移：早期版本短暂引入过「术语库」表（v19），现已回退到 v18。
         // 已升级到 v19 的旧库在降级时删除该表，避免 Room 因缺少 19→18 迁移而崩溃。
         val MIGRATION_19_18 = object : Migration(19, 18) {
@@ -270,7 +317,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "ebook_reader.db",
                 )
-                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_19_18)
+                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_19_18)
                     .fallbackToDestructiveMigrationFrom(1, 2, 3, 4)
                     .build().also { INSTANCE = it }
             }

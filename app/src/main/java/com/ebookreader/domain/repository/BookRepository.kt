@@ -14,6 +14,7 @@ interface BookRepository {
     fun getBooksByDateAdded(): Flow<List<Book>>
     fun getBooksByAllTags(tagIds: List<Long>, count: Int): Flow<List<Book>>
     fun getBooksByAnyTags(tagIds: List<Long>): Flow<List<Book>>
+    fun getBookIdsByTag(tagId: Long): Flow<Set<Long>>
     fun getBooksByTagTerms(terms: List<TagTerm>): Flow<List<Book>>
     fun getBooksByTagGroups(groups: List<List<Long>>): Flow<List<Book>>
     fun getBooksByTagGroupsWithNegation(

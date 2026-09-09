@@ -80,6 +80,14 @@ class PixivClient(
             maxResults,
         )
 
+    /** 按书名/简介搜索小说（title_and_caption），用于「相似书名」推荐。 */
+    suspend fun searchNovelsByTitle(query: String, maxResults: Int = 6): List<OnlineBook> =
+        fetchNovels(
+            "https://app-api.pixiv.net/v1/search/novel?word=" +
+                URLEncoder.encode(query, "UTF-8") + "&search_target=title_and_caption",
+            maxResults,
+        )
+
     /** Pixiv 官方推荐小说（按登录账号的浏览/收藏推荐）。 */
     suspend fun recommendedNovels(maxResults: Int = 5): List<OnlineBook> =
         fetchNovels("https://app-api.pixiv.net/v1/novel/recommended", maxResults)
@@ -117,6 +125,13 @@ class PixivClient(
                         val cover = obj.optJSONObject("image_urls")?.optString("medium").orEmpty()
                         val caption = obj.optString("caption", "").take(120)
                         val bookmarks = obj.optInt("total_bookmarks", 0)
+                        val tags = obj.optJSONArray("tags")?.let { arr ->
+                            (0 until arr.length()).mapNotNull { i ->
+                                val t = arr.optJSONObject(i) ?: return@mapNotNull null
+                                listOf(t.optString("name"), t.optString("translated_name"))
+                                    .firstOrNull { it.isNotBlank() }
+                            }.take(10)
+                        } ?: emptyList()
                         add(
                             OnlineBook(
                                 key = "pixiv:$id",
@@ -128,6 +143,7 @@ class PixivClient(
                                 link = "https://www.pixiv.net/novel/show.php?id=$id",
                                 source = "Pixiv",
                                 popularity = Math.log10(bookmarks + 1.0),
+                                tags = tags,
                             )
                         )
                     }

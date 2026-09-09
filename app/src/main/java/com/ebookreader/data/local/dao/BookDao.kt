@@ -72,6 +72,9 @@ interface BookDao {
     @Query("SELECT * FROM book_tag_cross_ref")
     fun observeAllBookTagRelations(): Flow<List<com.ebookreader.data.local.entity.BookTagCrossRef>>
 
+    @Query("SELECT bookId FROM book_tag_cross_ref WHERE tagId = :tagId")
+    fun observeBookIdsByTag(tagId: Long): Flow<List<Long>>
+
     @Query("SELECT COUNT(*) FROM books WHERE filePath LIKE '%' || :baseName || '.%' OR filePath LIKE '%' || :baseName || '_fixed.%'")
     suspend fun countBooksByBaseName(baseName: String): Int
 

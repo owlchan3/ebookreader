@@ -41,6 +41,9 @@ class BookRepositoryImpl(private val bookDao: BookDao) : BookRepository {
     override fun getBooksByAnyTags(tagIds: List<Long>): Flow<List<Book>> =
         bookDao.getBooksByAnyTags(tagIds).map { list -> list.map { it.toDomain() } }
 
+    override fun getBookIdsByTag(tagId: Long): Flow<Set<Long>> =
+        bookDao.observeBookIdsByTag(tagId).map { it.toSet() }
+
     override suspend fun insertBook(book: Book): Long =
         bookDao.insertBook(book.toEntity())
 

@@ -4,6 +4,7 @@ import com.ebookreader.data.local.dao.TagDao
 import com.ebookreader.data.local.entity.TagEntity
 import com.ebookreader.data.mapper.toDomain
 import com.ebookreader.data.mapper.toEntity
+import com.ebookreader.domain.model.PIN_TAG_NAME
 import com.ebookreader.domain.model.READ_TAG_NAME
 import com.ebookreader.domain.model.Tag
 import com.ebookreader.domain.model.TagGroup
@@ -22,14 +23,21 @@ class TagRepositoryImpl(private val tagDao: TagDao) : TagRepository {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     init {
-        // 确保「已阅」特殊标签存在（幂等），供统计与标记使用。
+        // 确保「已阅」「置顶」特殊标签存在（幂等），供统计/标记/置顶使用。
         scope.launch { ensureReadTagExists() }
+        scope.launch { ensurePinTagExists() }
     }
 
     override suspend fun ensureReadTagExists(): Long {
         tagDao.getTagByName(READ_TAG_NAME)?.let { return it.id }
         val id = tagDao.insertTagIgnore(TagEntity(name = READ_TAG_NAME))
         return if (id != -1L) id else tagDao.getTagByName(READ_TAG_NAME)!!.id
+    }
+
+    override suspend fun ensurePinTagExists(): Long {
+        tagDao.getTagByName(PIN_TAG_NAME)?.let { return it.id }
+        val id = tagDao.insertTagIgnore(TagEntity(name = PIN_TAG_NAME))
+        return if (id != -1L) id else tagDao.getTagByName(PIN_TAG_NAME)!!.id
     }
 
     override fun getAllTags(): Flow<List<Tag>> =

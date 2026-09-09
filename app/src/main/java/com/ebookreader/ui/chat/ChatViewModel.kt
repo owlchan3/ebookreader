@@ -15,6 +15,8 @@ import com.ebookreader.domain.repository.BookRepository
 import com.ebookreader.domain.repository.ChatRepository
 import com.ebookreader.ui.decompose.DecomposePrompts
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -109,6 +111,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _diagnostic = MutableStateFlow("")
     val diagnostic: StateFlow<String> = _diagnostic.asStateFlow()
 
+    /** 索引建立进度（向量索引 embedded/total），null 表示未在建立或已完成。 */
+    private val _indexProgress = MutableStateFlow<String?>(null)
+    val indexProgress: StateFlow<String?> = _indexProgress.asStateFlow()
+
+    /** 串行化诊断面板的原地改行，避免与「事件摘要」等后台任务并发读改写同一字符串。 */
+    private val diagLock = Any()
+
     /** Selected chapters to filter context by. When non-empty, the pipeline loads
      *  the full content of these chapters instead of running BM25 keyword search. */
     private val _chapterFilter = MutableStateFlow<Set<String>>(emptySet())
@@ -136,6 +145,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         // AI 拆书结果作为优先上下文的预算（全书总结 + 逐章梗概）
         private const val DECOMPOSITION_BUDGET = 12_000
+
+        // 检索召回与最终注入：候选块数 / LLM 重排保留块数。
+        // 重排保留量不再固定为 8，而是给足候选，让 buildSystemPrompt 按字符预算
+        // （MAX_CONTEXT_CHARS - HISTORY_BUDGET ≈ 47k 字）尽可能填满，覆盖跨全书的问题。
+        private const val RETRIEVAL_TOPK = 60
+        private const val RERANK_TOPK = 40
+
+        // 拆书优先模式（主书已拆 deep 档）：轻量检索召回块数（本地 BM25+向量，不重排，仅补原文细节）
+        private const val LIGHT_RETRIEVAL_TOPK = 20
+        // 拆书优先模式的拆书结果预算（全局模块 + 命中章节的逐章梗概）
+        private const val DECOMPOSITION_FIRST_BUDGET = 20_000
+
+        // 注入到系统提示的紧凑章节目录预算（避免 LLM 编造章节号）
+        private const val CHAPTER_DIRECTORY_BUDGET = 3_000
 
         // ── Temporal query detection patterns ──
         private val TEMPORAL_PATTERNS = listOf(
@@ -172,6 +195,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val chunkCount = chatRepository.getChunkCount(bookId)
                 diag.appendLine("索引状态: ${if (indexed) "新建索引" else "已缓存"}")
                 diag.appendLine("分块数: $chunkCount")
+                diag.appendLine("向量模型: ${chatRepository.embeddingModelStatus()}")
+                val embedded = chatRepository.getChunkEmbeddingCount(bookId)
+                diag.appendLine("向量索引: $embedded/$chunkCount")
             } catch (e: Exception) {
                 diag.appendLine("!!! 索引失败: ${e.message}")
                 _loadError.value = "索引失败: ${e.message}"
@@ -181,7 +207,40 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             // Kick off event summary generation in background (don't block UI)
             if (book != null) {
-                generateMissingSummaries(bookId, book.title)
+                // 后台向量化（向量未就绪前检索自动回退 BM25）
+                launch {
+                    chatRepository.ensureEmbedded(bookId) { _, _, status ->
+                        setDiagnosticLine("向量模型:", "向量模型: $status")
+                    }
+                }
+                // 轮询刷新向量索引进度：阅读页后台向量化时无回调、且与本地 embedMutex 串行，
+                // 进入对话页后只拿到进入时的快照。这里每 800ms 读一次计数直到满，实时刷新。
+                launch {
+                    try {
+                        val total = chatRepository.getChunkCount(bookId)
+                        if (total > 0) {
+                            while (isActive) {
+                                val embedded = chatRepository.getChunkEmbeddingCount(bookId)
+                                setDiagnosticLine("向量索引:", "向量索引: $embedded/$total")
+                                if (embedded >= total) {
+                                    _indexProgress.value = "向量索引已就绪"
+                                    break
+                                }
+                                _indexProgress.value = "正在建立向量索引：$embedded/$total"
+                                delay(800)
+                            }
+                        } else {
+                            _indexProgress.value = "向量索引未建立"
+                        }
+                    } catch (_: Exception) {
+                        _indexProgress.value = null
+                    }
+                }
+                // 事件摘要生成放独立协程：此前直接 await 会阻塞上面的向量化与进度轮询，
+                // 导致索引进度迟迟不出现、也不实时刷新。
+                launch {
+                    generateMissingSummaries(bookId, book.title)
+                }
             }
         }
         viewModelScope.launch {
@@ -208,6 +267,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             bookRepository.getAllBooks().collect { _allBooks.value = it }
+        }
+    }
+
+    /**
+     * 原地更新诊断面板中某个前缀开头的行（避免重复刷行），并用互斥锁串行化，
+     * 防止与「事件摘要」等后台任务并发读改写同一字符串导致进度回退。
+     */
+    private fun setDiagnosticLine(prefix: String, text: String) {
+        synchronized(diagLock) {
+            val cur = _diagnostic.value
+            val lines = cur.lines().toMutableList()
+            val idx = lines.indexOfFirst { it.trimStart().startsWith(prefix) }
+            if (idx >= 0) lines[idx] = text else lines.add(text)
+            _diagnostic.value = lines.joinToString("\n")
         }
     }
 
@@ -280,12 +353,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 for (bid in _importedBookIds.value) {
                     chatRepository.ensureIndexed(bid)
                 }
-                // Launch summaries as non-blocking background task
+                // Launch summaries + embeddings as non-blocking background tasks
                 for (bid in _importedBookIds.value) {
                     val meta = bookMetaCache[bid]
                     if (meta != null) {
                         launch { generateMissingSummaries(bid, meta.title) }
                     }
+                    launch { chatRepository.ensureEmbedded(bid) }
                 }
 
                 // Step 0.5: Detect temporal query
@@ -386,6 +460,59 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
+                // ── 拆书优先分支：主书已拆 deep 档时，跳过查询扩展与 LLM 重排，──
+                // 以拆书全局模块（全书总结/人物/时间线/世界观等）为主体 + 轻量检索补细节。
+                // 相比标准 RAG（3 次 LLM），此处仅 1 次 LLM 调用，且上下文更小、覆盖更全。
+                val mainDecomposed = try {
+                    decompositionDao.getByBookId(bookId)?.status == "done"
+                } catch (_: Exception) { false }
+
+                if (mainDecomposed) {
+                    diag.appendLine("=== 拆书优先模式（已拆书，跳过查询扩展/重排） ===")
+                    _diagnostic.value = diag.toString()
+
+                    // 轻量检索：本地 BM25+向量，不重排，仅补具体原文细节
+                    val lightStart = System.currentTimeMillis()
+                    val lightCandidates = try {
+                        chatRepository.searchChunks(
+                            bookIds = _importedBookIds.value,
+                            queries = listOf(trimmed),
+                            topK = LIGHT_RETRIEVAL_TOPK,
+                            preferEarlierChunks = isTemporal,
+                        )
+                    } catch (e: Exception) {
+                        diag.appendLine("轻量检索失败: ${e.message?.take(60)}")
+                        emptyList()
+                    }
+                    val lightMs = System.currentTimeMillis() - lightStart
+                    diag.appendLine("轻量检索: ${lightMs}ms, ${lightCandidates.size}块" +
+                        if (isTemporal) " (时间优先)" else "")
+                    _diagnostic.value = diag.toString()
+
+                    val selected = if (isTemporal) lightCandidates.sortedBy { it.chunkIndex } else lightCandidates
+
+                    val systemPrompt = buildDecompositionFirstPrompt(selected)
+
+                    val allMessages = try {
+                        chatRepository.getMessagesOnce(convId)
+                    } catch (e: Exception) {
+                        diag.appendLine("获取历史消息失败: ${e.message?.take(60)}")
+                        emptyList()
+                    }
+                    val recentMessages = allMessages.takeLast(20)
+
+                    diag.appendLine("--- 上下文 ---")
+                    diag.appendLine("轻量检索块: ${selected.size}")
+                    diag.appendLine("SysPrompt: ${systemPrompt.length}字")
+                    diag.appendLine("历史消息: ${recentMessages.size}条")
+                    _diagnostic.value = diag.toString()
+
+                    _tokenEstimate.value = "约" + String.format("%,d", (systemPrompt.length + recentMessages.sumOf { it.content.length }) / 2) + " tokens"
+
+                    startStreamingResponse(convId, recentMessages, systemPrompt)
+                    return@launch
+                }
+
                 // ── Original BM25 pipeline (below) ──
                 // Step 1: Query expansion (with timeout protection)
                 val expandStart = System.currentTimeMillis()
@@ -403,31 +530,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 // Step 2: BM25 search
                 val searchStart = System.currentTimeMillis()
-                val candidates = try {
+                var candidates = try {
                     chatRepository.searchChunks(
                         bookIds = _importedBookIds.value,
                         queries = queries,
-                        topK = 20,
+                        topK = RETRIEVAL_TOPK,
                         preferEarlierChunks = isTemporal,
                     )
                 } catch (e: Exception) {
-                    diag.appendLine("BM25检索失败: ${e.message?.take(60)}")
+                    diag.appendLine("检索失败: ${e.message?.take(60)}")
                     emptyList()
                 }
                 val searchMs = System.currentTimeMillis() - searchStart
-                diag.appendLine("BM25检索: ${searchMs}ms, ${candidates.size}个候选块" +
+                diag.appendLine("检索: ${searchMs}ms, ${candidates.size}个候选块" +
                     if (isTemporal) " (时间优先)" else "")
                 _diagnostic.value = diag.toString()
 
-                // Step 3: LLM reranking
-                val rerankedIndices: List<Int> = if (candidates.size > 8) {
+                // Step 2.5: 章节级去重 —— 防止热门章节垄断候选、跨章召回不足；同时缩小重排输入
+                val dedupedCandidates = dedupByChapter(candidates, maxPerChapter = 3)
+                if (dedupedCandidates.size < candidates.size) {
+                    diag.appendLine("章节去重: ${candidates.size} → ${dedupedCandidates.size}块（每章最多3块）")
+                    _diagnostic.value = diag.toString()
+                }
+                candidates = dedupedCandidates
+
+                // Step 3: LLM reranking — 保留量按预算给足，而非固定 8 块
+                val rerankedIndices: List<Int> = if (candidates.size > RERANK_TOPK) {
                     val rerankStart = System.currentTimeMillis()
                     val indices = try {
-                        val result = deepSeekClient.rerankChunks(trimmed, candidates, topK = 8)
-                        result.getOrDefault(candidates.indices.take(8).toList())
+                        val result = deepSeekClient.rerankChunks(trimmed, candidates, topK = RERANK_TOPK)
+                        result.getOrDefault(candidates.indices.take(RERANK_TOPK).toList())
                     } catch (e: Exception) {
-                        diag.appendLine("LLM重排失败: ${e.message?.take(60)}，回退到top-8")
-                        candidates.indices.take(8).toList()
+                        diag.appendLine("LLM重排失败: ${e.message?.take(60)}，回退到top-${RERANK_TOPK}")
+                        candidates.indices.take(RERANK_TOPK).toList()
                     }
                     val rerankMs = System.currentTimeMillis() - rerankStart
                     diag.appendLine("LLM重排: ${rerankMs}ms, 选中${indices.size}块")
@@ -534,6 +669,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         if (_importedBookIds.value.contains(importBookId)) return
         viewModelScope.launch {
             chatRepository.ensureIndexed(importBookId)
+            launch { chatRepository.ensureEmbedded(importBookId) }
             val importedBook = bookRepository.getBookById(importBookId)
             if (importedBook != null) {
                 bookMetaCache[importBookId] = importedBook
@@ -724,18 +860,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 totalProcessed += summaries.size
 
-                // Update diagnostic if still on loading screen
-                val current = _diagnostic.value
-                if (current.contains("书籍加载")) {
-                    _diagnostic.value = current + "\n事件摘要: 已生成 $totalProcessed 块"
+                // 摘要生成后回填向量，让语义检索也能利用摘要信号（否则摘要只在 BM25 下生效）
+                if (summaries.isNotEmpty()) {
+                    try {
+                        chatRepository.reembedChunks(bookId, summaries.keys.toList())
+                    } catch (_: Exception) {}
+                }
+
+                // 仅在加载页显示摘要进度（原地更新，串行化避免与向量进度竞态）
+                if (_diagnostic.value.contains("书籍加载")) {
+                    setDiagnosticLine("事件摘要:", "事件摘要: 已生成 $totalProcessed 块")
                 }
             }
             if (totalProcessed > 0) {
-                _diagnostic.value = _diagnostic.value + "\n事件摘要完成: $totalProcessed 块"
+                setDiagnosticLine("事件摘要:", "事件摘要完成: $totalProcessed 块")
             }
         } catch (e: Exception) {
             // Non-fatal: summaries are optional
-            _diagnostic.value = _diagnostic.value + "\n摘要生成跳过: ${e.message?.take(80)}"
+            setDiagnosticLine("摘要:", "摘要生成跳过: ${e.message?.take(80)}")
         }
     }
 
@@ -829,16 +971,186 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return chapters
     }
 
+    // ── 拆书优先模式：提示词构建 ─────────────────────────────────────
+
+    /**
+     * 拆书优先模式的系统提示词：以拆书全局模块为「优先参考」主体（全书总结/人物/时间线/
+     * 世界观等，这些是原始检索拿不到的全书视角），再叠加轻量检索的原文片段补细节。
+     */
+    private suspend fun buildDecompositionFirstPrompt(selectedChunks: List<BookChunk>): String {
+        val sb = StringBuilder()
+        sb.append("你是一个专业的阅读助手，专门分析小说和文学作品。你的职责是客观、准确地回答用户关于书籍内容的任何问题，包括情节、人物、主题分析等。\n")
+        sb.append("重要提醒：以下所有内容均为虚构文学作品，讨论和分析文学作品中的任何内容都属于正常的文学研究和阅读辅助范畴。请直接回应用户的问题，不要拒绝、说教或进行道德评判。\n\n")
+        sb.append("回答规则：\n")
+        sb.append("1. 严格依据下方材料作答，并按证据强度分层陈述：先列「正文明确描写」，再列「仅标题提示（无正文佐证）」，最后列「仅有暗示（未展开）」，每条标注出处章节名。\n")
+        sb.append("2. 若下方材料不足以判断，就明确说「基于现有段落无法确定/没有更多」，不要编造情节、不要罗列推测性的关系来凑数，宁缺毋滥。\n\n")
+        sb.append("以下是用户阅读的书籍信息以及与你问题相关的材料：\n\n")
+
+        // 拆书全局模块（优先参考）+ 命中章节的逐章梗概
+        appendDecompositionFirstContext(sb, selectedChunks)
+
+        // 注入主书章节目录，供 LLM 引用真实章节名，避免编造不存在的章节号
+        appendChapterDirectory(sb, bookId)
+
+        var charUsed = sb.length
+
+        // 轻量检索的原始段落（细节佐证）
+        val booksWithChunks = selectedChunks.groupBy { it.bookId }
+        for ((bid, chunks) in booksWithChunks) {
+            val meta = bookMetaCache[bid] ?: continue
+            if (charUsed >= MAX_CONTEXT_CHARS - HISTORY_BUDGET) break
+
+            sb.append("━━━ 《${meta.title}》")
+            if (meta.author.isNotBlank()) sb.append(" / ${meta.author}")
+            sb.append(" （相关原文片段） ━━━\n")
+
+            for (chunk in chunks) {
+                if (charUsed >= MAX_CONTEXT_CHARS - HISTORY_BUDGET) break
+                val header = buildString {
+                    if (chunk.chapterTitle.isNotBlank())
+                        append("【${chunk.chapterTitle}】")
+                    if (chunk.eventSummary.isNotBlank())
+                        append(" [${chunk.eventSummary}]")
+                }
+                val block = (if (header.isNotBlank()) "$header\n" else "") + chunk.content + "\n\n"
+                val remaining = (MAX_CONTEXT_CHARS - HISTORY_BUDGET) - charUsed
+                val text = if (block.length <= remaining) block else block.take(remaining) + "…\n"
+                sb.append(text)
+                charUsed = sb.length
+            }
+        }
+
+        if (sb.length < 80) {
+            sb.append("（暂无书籍内容可供参考。请以通用模式回答用户问题。）\n")
+        }
+
+        sb.append("\n回答指引：1) 优先引用上述拆书结果与原文片段中的具体内容作为依据；")
+        sb.append("2) 拆书结果反映全书视角，可回答跨章节的宏观问题；原文片段用于定位具体细节；")
+        sb.append("3) 使用中文回复；")
+        sb.append("4) 引用具体内容时明确标注出处（如'据《XXX》第X章'）；涉及多本书时务必区分是哪本书，不要张冠李戴。")
+        return sb.toString()
+    }
+
+    /**
+     * 拆书优先模式：对已拆书（status=done）的书，注入拆书全局模块（全书总结 + 人物/时间线/
+     * 世界观/人物小传/金句）+ 命中章节的逐章梗概（按需取章，避免 deep 档整本梗概撑爆上下文）。
+     */
+    private suspend fun appendDecompositionFirstContext(sb: StringBuilder, selectedChunks: List<BookChunk>) {
+        var used = 0
+        for (bid in _importedBookIds.value) {
+            if (used >= DECOMPOSITION_FIRST_BUDGET) break
+            val entity = try {
+                decompositionDao.getByBookId(bid)
+            } catch (_: Exception) { null } ?: continue
+            if (entity.status != "done") continue
+            val meta = bookMetaCache[bid] ?: continue
+
+            val hitTitles = selectedChunks.asSequence()
+                .filter { it.bookId == bid && it.chapterTitle.isNotBlank() }
+                .map { it.chapterTitle }
+                .toSet()
+
+            val block = buildDecompositionFirstBlock(meta.title, entity, hitTitles)
+            val remaining = DECOMPOSITION_FIRST_BUDGET - used
+            val text = if (block.length <= remaining) block else block.take(remaining) + "…\n"
+            sb.append(text)
+            used += text.length
+        }
+    }
+
+    /**
+     * 构建拆书优先的拆书结果块：全书总结 + 人物/时间线/世界观/人物小传/金句（全局模块，
+     * 不带拓展阅读，避免无关 token）+ 命中章节的逐章梗概。
+     */
+    private fun buildDecompositionFirstBlock(title: String, entity: BookDecompositionEntity, hitTitles: Set<String>): String {
+        val sb = StringBuilder()
+        sb.append("━━━ 《$title》 AI拆书结果（优先参考，全书视角） ━━━\n")
+        if (entity.bookSummary.isNotBlank()) {
+            sb.append("【全书总结】\n").append(entity.bookSummary.trim()).append("\n\n")
+        }
+        val titles = DecomposePrompts.deepModules(entity.bookType).associateBy { it.key }
+        listOf(
+            "characters" to entity.charactersJson,
+            "timeline" to entity.timelineJson,
+            "quotes" to entity.quotesJson,
+            "characterBios" to entity.characterBiosJson,
+            "worldSetting" to entity.worldSettingJson,
+        ).forEach { (key, content) ->
+            if (content.isNotBlank()) {
+                sb.append("【").append(titles[key]?.title ?: key).append("】\n")
+                    .append(content.trim()).append("\n\n")
+            }
+        }
+        val chapters = parseDecomposedChapters(entity.chapterSummariesJson)
+        val hit = chapters.filter { it.title in hitTitles }
+        if (hit.isNotEmpty()) {
+            sb.append("【逐章梗概（仅命中章节）】\n")
+            for (ch in hit) {
+                sb.append("· ${ch.title}：${ch.summary}")
+                if (ch.events.isNotBlank()) sb.append("（关键事件：${ch.events}）")
+                sb.append("\n")
+            }
+            sb.append("\n")
+        }
+        sb.append("━━━━━━━━━━━━━━━━━━━━\n")
+        return sb.toString()
+    }
+
     // ── System prompt builder ──────────────────────────────────────────────
+
+    /**
+     * 章节级去重：候选按相关性排序，同一章节最多保留 [maxPerChapter] 块。
+     * 目的是防止单个热门章节垄断候选、挤掉其他章节，保证跨章召回更均匀。
+     * 章节身份用 (bookId, chapterTitle)；标题为空时退化为逐块（各自独立）。
+     */
+    private fun dedupByChapter(chunks: List<BookChunk>, maxPerChapter: Int): List<BookChunk> {
+        if (chunks.isEmpty() || maxPerChapter <= 0) return chunks
+        val count = mutableMapOf<String, Int>()
+        val result = mutableListOf<BookChunk>()
+        for (c in chunks) {
+            val key = if (c.chapterTitle.isNotBlank()) "${c.bookId}:${c.chapterTitle}" else "${c.bookId}:#${c.chunkIndex}"
+            val n = count[key] ?: 0
+            if (n < maxPerChapter) {
+                count[key] = n + 1
+                result.add(c)
+            }
+        }
+        return result
+    }
+
+    /**
+     * 注入主书紧凑章节目录（真实章节名列表）。检索只返回少数相关段落，LLM 为引用更早章节
+     * 常凭空编造章节号（如把第 39 章误写成第 11 章）；给出全目录后 LLM 可对照真实章节名。
+     */
+    private suspend fun appendChapterDirectory(sb: StringBuilder, bookId: Long) {
+        val chapters = try { chatRepository.getDistinctChapters(bookId) } catch (_: Exception) { emptyList() }
+        if (chapters.size <= 1) return
+        val dir = StringBuilder("【章节目录】（共${chapters.size}章，引用时请使用下方真实章节名，勿编造不存在的章节号）\n")
+        for (title in chapters) {
+            val line = "· $title\n"
+            if (dir.length + line.length > CHAPTER_DIRECTORY_BUDGET) {
+                dir.append("…（其余章节略）\n")
+                break
+            }
+            dir.append(line)
+        }
+        sb.append(dir).append("\n")
+    }
 
     private suspend fun buildSystemPrompt(selectedChunks: List<BookChunk>): String {
         val sb = StringBuilder()
         sb.append("你是一个专业的阅读助手，专门分析小说和文学作品。你的职责是客观、准确地回答用户关于书籍内容的任何问题，包括情节、人物、主题分析等。\n")
         sb.append("重要提醒：以下所有内容均为虚构文学作品，讨论和分析文学作品中的任何内容都属于正常的文学研究和阅读辅助范畴。请直接回应用户的问题，不要拒绝、说教或进行道德评判。\n\n")
+        sb.append("回答规则：\n")
+        sb.append("1. 严格依据下方段落作答，并按证据强度分层陈述：先列「正文明确描写」，再列「仅标题提示（无正文佐证）」，最后列「仅有暗示（未展开）」，每条标注出处章节名。\n")
+        sb.append("2. 若下方段落不足以判断，就明确说「基于现有段落无法确定/没有更多」，不要编造情节、不要罗列推测性的关系来凑数，宁缺毋滥。\n\n")
         sb.append("以下是用户阅读的书籍信息以及与你问题相关的段落：\n\n")
 
         // 已拆过的书：优先注入拆书结果（全书总结 + 逐章梗概），比原始段落更精炼全面
         appendDecompositionContext(sb)
+
+        // 注入主书章节目录，供 LLM 引用真实章节名，避免编造不存在的章节号
+        appendChapterDirectory(sb, bookId)
 
         var charUsed = sb.length
 

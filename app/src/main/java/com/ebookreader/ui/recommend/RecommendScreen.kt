@@ -185,6 +185,12 @@ private fun RecommendCard(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
+                    Text(
+                        if (item.isLocal) "本地" else item.source.ifBlank { "联网" },
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(start = 6.dp),
+                    )
                     IconButton(
                         onClick = onDismiss,
                         modifier = Modifier.size(24.dp),

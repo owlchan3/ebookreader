@@ -3,6 +3,7 @@ package com.ebookreader.data.mapper
 import com.ebookreader.data.local.entity.AnnotationEntity
 import com.ebookreader.data.local.entity.BookChunkEntity
 import com.ebookreader.data.local.entity.BookEntity
+import com.ebookreader.data.local.entity.BookKeywordEntity
 import com.ebookreader.data.local.entity.BookmarkEntity
 import com.ebookreader.data.local.entity.ChapterEntity
 import com.ebookreader.data.local.entity.ChatMessageEntity
@@ -17,6 +18,7 @@ import com.ebookreader.domain.model.Bookmark
 import com.ebookreader.domain.model.Chapter
 import com.ebookreader.domain.model.ChatMessage
 import com.ebookreader.domain.model.Conversation
+import com.ebookreader.domain.model.Keyword
 import com.ebookreader.domain.model.Tag
 import com.ebookreader.domain.model.TagGroup
 
@@ -180,6 +182,19 @@ fun ChatMessage.toEntity(): ChatMessageEntity = ChatMessageEntity(
     role = role,
     content = content,
     timestamp = timestamp,
+)
+
+fun BookKeywordEntity.toDomain(): Keyword = Keyword(
+    keyword = keyword,
+    weight = weight,
+    rank = rank,
+)
+
+fun Keyword.toEntity(bookId: Long): BookKeywordEntity = BookKeywordEntity(
+    bookId = bookId,
+    keyword = keyword,
+    weight = weight,
+    rank = rank,
 )
 
 fun BookChunkEntity.toDomain(

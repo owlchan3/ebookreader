@@ -274,6 +274,33 @@ class ApiKeyManager(context: Context) {
     fun clearRecentlyShownRecommendations() =
         prefs.edit().remove("recently_shown_recommendations").apply()
 
+    /** 「最近当种子」的本地书（bookId -> 最后当种子时间戳），用于种子抽样降权。 */
+    fun getRecentSeeds(): Map<Long, Long> {
+        val json = prefs.getString("recent_seed_books", "{}") ?: "{}"
+        return try {
+            val obj = org.json.JSONObject(json)
+            val map = mutableMapOf<Long, Long>()
+            val it = obj.keys()
+            while (it.hasNext()) {
+                val k = it.next()
+                map[k.toLongOrNull() ?: continue] = obj.optLong(k, 0L)
+            }
+            map
+        } catch (_: Exception) { emptyMap() }
+    }
+
+    /** 记录本次选中的种子书，并清理 3 天前的记录。 */
+    fun recordSeeds(bookIds: List<Long>) {
+        val now = System.currentTimeMillis()
+        val map = getRecentSeeds().toMutableMap()
+        for (id in bookIds) map[id] = now
+        val cutoff = now - 3L * 24 * 3600 * 1000
+        val pruned = map.filterValues { it >= cutoff }
+        val obj = org.json.JSONObject()
+        for ((k, v) in pruned) obj.put(k.toString(), v)
+        prefs.edit().putString("recent_seed_books", obj.toString()).apply()
+    }
+
     /** Google Books API Key（可选，留空则用匿名配额，容易触顶；填自己的 key 可提升额度）。 */
     fun getGoogleBooksApiKey(): String = prefs.getString("google_books_api_key", "") ?: ""
 

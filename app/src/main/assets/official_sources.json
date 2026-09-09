@@ -1,0 +1,38 @@
+[
+  {
+    "sourceName": "起点",
+    "baseUrl": "https://m.qidian.com",
+    "searchUrl": "/soushu/{{key}}.html?pageNum={{page}}",
+    "bookList": "a[data-bid]",
+    "nameRule": "h2@text",
+    "authorRule": "p[class*=\"searchBookAuthor\"]@text",
+    "coverRule": "img@data-src",
+    "descRule": "p[class*=\"searchBookDesc\"]@text",
+    "urlRule": "@data-bid##^(.+)$##https://m.qidian.com/book/$1/",
+    "keyPrefix": "qd"
+  },
+  {
+    "sourceName": "晋江",
+    "baseUrl": "https://www.jjwxc.net",
+    "searchUrl": "/search/search_ajax.php?action=search&keywords={{key}}&type=1&version=1&getfull=1",
+    "bookList": "$.data",
+    "nameRule": "novelname",
+    "authorRule": "authorname",
+    "coverRule": "",
+    "descRule": "",
+    "urlRule": "https://www.jjwxc.net/onebook.php?novelid={{$.novelid}}",
+    "keyPrefix": "jj"
+  },
+  {
+    "sourceName": "菠萝包",
+    "baseUrl": "https://book.sfacg.com",
+    "searchUrl": "/List/Default.aspx?key={{key}}&PageIndex={{page}}",
+    "bookList": "ul.Comic_Pic_List",
+    "nameRule": "strong@text",
+    "authorRule": "a[href*=\"/Club/\"]@text",
+    "coverRule": "img@src",
+    "descRule": "",
+    "urlRule": "a@href",
+    "keyPrefix": "sf"
+  }
+]

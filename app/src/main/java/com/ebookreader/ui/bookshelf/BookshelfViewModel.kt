@@ -6,6 +6,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.ebookreader.background.KeywordAutoGenerator
 import com.ebookreader.data.importer.BookImporter
 import com.ebookreader.di.Injector
 import com.ebookreader.domain.model.Book
@@ -21,12 +22,14 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-enum class SortMode { RECENT, TITLE, AUTHOR, DATE_ADDED, FORMAT }
+enum class SortMode { RECENT, TITLE, AUTHOR, DATE_ADDED }
 enum class SearchMode { TEXT, TAG }
 enum class TagLogic { AND, OR }
 
@@ -83,6 +86,16 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
     val tagGroups: StateFlow<List<TagGroup>> = tagRepository.getAllTagGroups()
         .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
+    /** 打了「置顶」标签的书 id 集合，供最近阅读排序置顶用。 */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val pinnedBookIds: StateFlow<Set<Long>> = allTags
+        .map { tags -> tags.firstOrNull { it.isPinTag }?.id }
+        .distinctUntilChanged()
+        .flatMapLatest { pinId ->
+            if (pinId == null) flowOf(emptySet<Long>()) else bookRepository.getBookIdsByTag(pinId)
+        }
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptySet())
+
     private val _selectedTagGroupId = MutableStateFlow<Long?>(null)
     val selectedTagGroupId: StateFlow<Long?> = _selectedTagGroupId.asStateFlow()
 
@@ -122,8 +135,8 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
         }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     val books: StateFlow<List<Book>> = combine(
-        filteredBooksFlow, _searchQuery, _sortMode, _searchMode
-    ) { list, query, sort, mode ->
+        filteredBooksFlow, _searchQuery, _sortMode, _searchMode, pinnedBookIds
+    ) { list, query, sort, mode, pinnedIds ->
         // TEXT mode: 按空白分词做多词 AND 搜索，逐词匹配书名/作者/格式；TAG mode: 已按标签过滤
         val filtered = if (mode == SearchMode.TEXT && query.isNotBlank()) {
             val terms = query.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
@@ -136,11 +149,17 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
             }
         } else list
         when (sort) {
-            SortMode.RECENT -> filtered.sortedByDescending { it.lastReadTimestamp }
+            SortMode.RECENT -> {
+                val byRecent = filtered.sortedByDescending { it.lastReadTimestamp }
+                if (pinnedIds.isEmpty()) byRecent
+                else {
+                    val (pinned, rest) = byRecent.partition { it.id in pinnedIds }
+                    pinned + rest
+                }
+            }
             SortMode.TITLE -> filtered.sortedBy { it.title.lowercase() }
             SortMode.AUTHOR -> filtered.sortedBy { it.author.lowercase() }
             SortMode.DATE_ADDED -> filtered.sortedByDescending { it.addedTimestamp }
-            SortMode.FORMAT -> filtered.sortedWith(compareBy({ it.format.uppercase() }, { it.title.lowercase() }))
         }
     }.stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
@@ -548,6 +567,21 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    /** 多选「关联」：把选中的书两两加入彼此的「相关书籍」（手动关联）。 */
+    fun associateSelected() {
+        val ids = _selectedIds.value.toList()
+        if (ids.size < 2) return
+        viewModelScope.launch {
+            for (i in ids.indices) {
+                for (j in i + 1 until ids.size) {
+                    bookRepository.addManualRelation(ids[i], ids[j])
+                }
+            }
+            _batchOpMessage.value = "已将 ${ids.size} 本书互相关联"
+            exitSelectionMode()
+        }
+    }
+
     // Import
     fun importBook(uri: Uri) {
         viewModelScope.launch {
@@ -565,6 +599,7 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
                 onSuccess = { imported ->
                     val newId = bookRepository.insertBook(imported.book)
                     bookRepository.syncAutoRelationsForBook(newId)
+                    KeywordAutoGenerator.ensureGenerated(newId)
                 },
                 onFailure = { _importError.value = it.message ?: "导入失败" },
             )
@@ -599,6 +634,7 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
                     onSuccess = { imported ->
                         val newId = bookRepository.insertBook(imported.book)
                         bookRepository.syncAutoRelationsForBook(newId)
+                        KeywordAutoGenerator.ensureGenerated(newId)
                         successCount++
                     },
                     onFailure = { e ->

@@ -63,8 +63,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -104,6 +110,7 @@ fun ChatScreen(
     val isLoadingBook by viewModel.isLoadingBook.collectAsState()
     val loadError by viewModel.loadError.collectAsState()
     val diagnostic by viewModel.diagnostic.collectAsState()
+    val indexProgress by viewModel.indexProgress.collectAsState()
     val tokenEstimate by viewModel.tokenEstimate.collectAsState()
     val chapterFilter by viewModel.chapterFilter.collectAsState()
     val allChapters by viewModel.allChapters.collectAsState()
@@ -344,6 +351,28 @@ fun ChatScreen(
                             modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
                             state = listState,
                         ) {
+                            // 对话开始前的水印：发送第一条消息后消失
+                            if (messages.isEmpty()) {
+                                item {
+                                    Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text(
+                                                "进行ai拆书以获得更好的对话效果",
+                                                fontSize = 13.sp,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f),
+                                            )
+                                            indexProgress?.let {
+                                                Spacer(Modifier.height(8.dp))
+                                                Text(
+                                                    it,
+                                                    fontSize = 12.sp,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f),
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             items(messages, key = { it.id }) { msg ->
                                 MessageBubble(msg, onToggleReasoning = null)
                             }
@@ -781,10 +810,16 @@ private fun MessageBubble(
                 }
                 // Answer text (always selectable)
                 SelectionContainer {
-                    Text(if (parsed != null) parsed.answer else msg.content,
-                        color = if (isUser) MaterialTheme.colorScheme.onPrimary
-                        else MaterialTheme.colorScheme.onSurface,
-                        fontSize = 15.sp)
+                    val answerText = if (parsed != null) parsed.answer else msg.content
+                    if (isUser) {
+                        Text(answerText,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            fontSize = 15.sp)
+                    } else {
+                        Text(parseMarkdown(answerText),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 15.sp)
+                    }
                 }
             }
         }
@@ -864,16 +899,16 @@ private fun StreamingBubble(
             Spacer(Modifier.height(4.dp))
         }
 
-        // Answer bubble
+        // Answer bubble — 流式输出期间文本每个 token 都会重绘，SelectionContainer 的长按选择
+        // 会被下一次重绘瞬间重置（表现为"有时选不中"）。流式阶段用普通 Text，落库后由
+        // MessageBubble 里的 SelectionContainer 提供可选文本。
         Box(Modifier.widthIn(max = 300.dp)
             .clip(RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
             .padding(12.dp)) {
-            SelectionContainer {
-                Text(content.ifEmpty { "…" },
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = 15.sp)
-            }
+            Text(parseMarkdown(content.ifEmpty { "…" }),
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 15.sp)
         }
 
         Row(
@@ -903,4 +938,63 @@ private fun formatTimestamp(ts: Long): String {
         val sdf = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
         sdf.format(Date(ts))
     } catch (_: Exception) { "" }
+}
+
+/**
+ * 轻量 markdown 渲染：把 AI 答案里的 `**加粗**`、`*斜体*`、`` `代码` ``、
+ * `# / ## / ### 标题`、`- 列表` 转成 AnnotatedString，其余按原样输出。
+ * 刻意只做最常见标记，避免引入完整 markdown 库；未闭合的标记按普通文本处理（流式截断容错）。
+ */
+private fun parseMarkdown(text: String): AnnotatedString = buildAnnotatedString {
+    val lines = text.split('\n')
+    for ((idx, rawLine) in lines.withIndex()) {
+        if (idx > 0) append('\n')
+        val t = rawLine.trim()
+        when {
+            t.startsWith("### ") -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                appendInlineMarkdown(t.removePrefix("### "))
+            }
+            t.startsWith("## ") -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                appendInlineMarkdown(t.removePrefix("## "))
+            }
+            t.startsWith("# ") -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                appendInlineMarkdown(t.removePrefix("# "))
+            }
+            t.startsWith("- ") -> {
+                append("• ")
+                appendInlineMarkdown(t.removePrefix("- "))
+            }
+            else -> appendInlineMarkdown(rawLine)
+        }
+    }
+}
+
+private fun AnnotatedString.Builder.appendInlineMarkdown(text: String) {
+    var i = 0
+    while (i < text.length) {
+        when {
+            text.startsWith("**", i) -> {
+                val end = text.indexOf("**", i + 2)
+                if (end > i + 2) {
+                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(text, i + 2, end) }
+                    i = end + 2
+                } else { append(text[i]); i++ }
+            }
+            text.startsWith("*", i) -> {
+                val end = text.indexOf("*", i + 1)
+                if (end > i + 1) {
+                    withStyle(SpanStyle(fontStyle = FontStyle.Italic)) { append(text, i + 1, end) }
+                    i = end + 1
+                } else { append(text[i]); i++ }
+            }
+            text.startsWith("`", i) -> {
+                val end = text.indexOf("`", i + 1)
+                if (end > i + 1) {
+                    withStyle(SpanStyle(fontFamily = FontFamily.Monospace)) { append(text, i + 1, end) }
+                    i = end + 1
+                } else { append(text[i]); i++ }
+            }
+            else -> { append(text[i]); i++ }
+        }
+    }
 }

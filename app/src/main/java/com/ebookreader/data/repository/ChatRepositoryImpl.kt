@@ -5,8 +5,11 @@ import android.content.Context
 import com.ebookreader.data.importer.BookImporter
 import com.ebookreader.data.local.dao.BookChunkDao
 import com.ebookreader.data.local.dao.ChatDao
+import com.ebookreader.data.local.dao.ChunkEmbeddingDao
+import com.ebookreader.data.local.entity.ChunkEmbeddingEntity
 import com.ebookreader.data.mapper.toDomain
 import com.ebookreader.data.mapper.toEntity
+import com.ebookreader.data.ml.EmbeddingModel
 import com.ebookreader.domain.model.BookChunk
 import com.ebookreader.domain.model.ChatMessage
 import com.ebookreader.domain.model.Conversation
@@ -14,6 +17,8 @@ import com.ebookreader.domain.repository.ChatRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.jsoup.Jsoup
 import org.readium.adapter.pdfium.document.PdfiumDocumentFactory
@@ -26,6 +31,8 @@ import org.readium.r2.streamer.parser.DefaultPublicationParser
 import timber.log.Timber
 import java.io.File
 import java.io.FileInputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.charset.Charset
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -37,8 +44,18 @@ import kotlin.math.sqrt
 class ChatRepositoryImpl(
     private val chatDao: ChatDao,
     private val bookChunkDao: BookChunkDao,
+    private val chunkEmbeddingDao: ChunkEmbeddingDao,
     private val context: Context,
 ) : ChatRepository {
+
+    /** Loaded lazily on first use (background IO thread), so app startup isn't blocked by the model. */
+    private val embeddingModel: EmbeddingModel by lazy { EmbeddingModel(context) }
+
+    /** 序列化对 ONNX 会话的访问：OrtSession.run 非线程安全，且多入口可能并发调用 embed。 */
+    private val embedMutex = Mutex()
+
+    /** 序列化分块索引：阅读页与对话页都可能触发 ensureIndexed，delete+insert 非原子。 */
+    private val indexMutex = Mutex()
 
     /** 切分算法升级后，一次性清空旧索引，强制重新分块。 */
     private suspend fun invalidateStaleIndex() {
@@ -47,6 +64,16 @@ class ChatRepositoryImpl(
         if (stored != CHUNK_INDEX_VERSION) {
             bookChunkDao.deleteAllChunks()
             prefs.edit().putInt(VERSION_KEY, CHUNK_INDEX_VERSION).apply()
+        }
+    }
+
+    /** 嵌入模型升级后一次性清空旧向量，触发按需重新向量化。 */
+    private suspend fun invalidateStaleEmbeddings() {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val stored = prefs.getInt(EMBEDDING_VERSION_KEY, 0)
+        if (stored != EMBEDDING_VERSION) {
+            chunkEmbeddingDao.deleteAllEmbeddings()
+            prefs.edit().putInt(EMBEDDING_VERSION_KEY, EMBEDDING_VERSION).apply()
         }
     }
 
@@ -144,77 +171,209 @@ class ChatRepositoryImpl(
         /** Overlap between consecutive chunks in characters. */
         private const val CHUNK_OVERLAP = 200
         /** 章节切分算法版本。改动切分逻辑时 +1，使已索引的书自动重建索引。 */
-        private const val CHUNK_INDEX_VERSION = 5
+        private const val CHUNK_INDEX_VERSION = 7
+        private const val EMBEDDING_VERSION = 2
         private const val PREFS_NAME = "chunk_index_meta"
         private const val VERSION_KEY = "chunk_index_version"
+        private const val EMBEDDING_VERSION_KEY = "embedding_model_version"
     }
 
     override suspend fun ensureIndexed(bookId: Long): Boolean = withContext(Dispatchers.IO) {
-        invalidateStaleIndex()
-        val book = resolveBook(bookId) ?: return@withContext false
-        val file = File(book.filePath)
-        if (!file.exists()) return@withContext false
+        indexMutex.withLock {
+            invalidateStaleIndex()
+            val book = resolveBook(bookId) ?: return@withLock false
+            val file = File(book.filePath)
+            if (!file.exists()) return@withLock false
 
-        val fileModified = file.lastModified()
-        // Check if we already have a valid index
-        val existing = bookChunkDao.hasCurrentIndex(bookId, fileModified)
-        if (existing != null) {
-            Timber.d("Book $bookId already indexed: ${bookChunkDao.getChunkCount(bookId)} chunks")
-            return@withContext false // no re-index needed
-        }
-
-        // Need to index: extract full content, then chunk
-        Timber.i("Indexing book $bookId: ${book.title} (${book.format})")
-        val fullText = extractContent(file.path, book.format)
-        if (fullText.isBlank()) {
-            Timber.w("Cannot index book $bookId: empty content")
-            return@withContext false
-        }
-
-        // Delete old chunks for this book
-        bookChunkDao.deleteChunksForBook(bookId)
-
-        // Detect chapter boundaries for EPUB/XHTML（EPUB 直接读取导航目录，与阅读器目录完全一致）
-        val rawChapters = extractChapters(file, book.format, fullText)
-
-        // Chunk each chapter with overlap
-        val chunks = mutableListOf<com.ebookreader.data.local.entity.BookChunkEntity>()
-        var globalOffset = 0
-        var chunkIndex = 0
-
-        for ((chapterTitle, chapterText) in rawChapters) {
-            val paragraphs = smartSplit(chapterText, CHUNK_SIZE - CHUNK_OVERLAP)
-            for (par in paragraphs) {
-                if (par.isBlank()) continue
-                val start = 0
-                var pos = start
-                while (pos < par.length) {
-                    val end = (pos + CHUNK_SIZE).coerceAtMost(par.length)
-                    val slice = par.substring(pos, end)
-                    chunks.add(
-                        com.ebookreader.data.local.entity.BookChunkEntity(
-                            bookId = bookId,
-                            chunkIndex = chunkIndex,
-                            chapterTitle = chapterTitle,
-                            content = slice,
-                            charOffset = globalOffset + pos,
-                            fileModified = fileModified,
-                        )
-                    )
-                    chunkIndex++
-                    // Next chunk start with overlap
-                    pos += CHUNK_SIZE - CHUNK_OVERLAP
-                    if (pos >= par.length) break
-                }
-                globalOffset += par.length + 1 // +1 for separator
+            val fileModified = file.lastModified()
+            // Check if we already have a valid index
+            val existing = bookChunkDao.hasCurrentIndex(bookId, fileModified)
+            if (existing != null) {
+                Timber.d("Book $bookId already indexed: ${bookChunkDao.getChunkCount(bookId)} chunks")
+                return@withLock false // no re-index needed
             }
-        }
 
-        if (chunks.isNotEmpty()) {
-            bookChunkDao.insertChunks(chunks)
-            Timber.i("Indexed book $bookId: ${chunks.size} chunks")
+            // Need to index: extract full content, then chunk
+            Timber.i("Indexing book $bookId: ${book.title} (${book.format})")
+            val fullText = extractContent(file.path, book.format)
+            if (fullText.isBlank()) {
+                Timber.w("Cannot index book $bookId: empty content")
+                return@withLock false
+            }
+
+            // Delete old chunks for this book
+            bookChunkDao.deleteChunksForBook(bookId)
+
+            // Detect chapter boundaries for EPUB/XHTML（EPUB 直接读取导航目录，与阅读器目录完全一致）
+            val rawChapters = extractChapters(file, book.format, fullText)
+
+            // Chunk each chapter with overlap
+            val chunks = mutableListOf<com.ebookreader.data.local.entity.BookChunkEntity>()
+            var globalOffset = 0
+            var chunkIndex = 0
+
+            for ((chapterTitle, chapterText) in rawChapters) {
+                val paragraphs = smartSplit(chapterText, CHUNK_SIZE - CHUNK_OVERLAP)
+                for (par in paragraphs) {
+                    if (par.isBlank()) continue
+                    val start = 0
+                    var pos = start
+                    while (pos < par.length) {
+                        val end = (pos + CHUNK_SIZE).coerceAtMost(par.length)
+                        val slice = par.substring(pos, end)
+                        chunks.add(
+                            com.ebookreader.data.local.entity.BookChunkEntity(
+                                bookId = bookId,
+                                chunkIndex = chunkIndex,
+                                chapterTitle = chapterTitle,
+                                content = slice,
+                                charOffset = globalOffset + pos,
+                                fileModified = fileModified,
+                            )
+                        )
+                        chunkIndex++
+                        // Next chunk start with overlap
+                        pos += CHUNK_SIZE - CHUNK_OVERLAP
+                        if (pos >= par.length) break
+                    }
+                    globalOffset += par.length + 1 // +1 for separator
+                }
+            }
+
+            if (chunks.isNotEmpty()) {
+                bookChunkDao.insertChunks(chunks)
+                Timber.i("Indexed book $bookId: ${chunks.size} chunks")
+            }
+            true
         }
-        return@withContext true
+    }
+
+    override suspend fun ensureEmbedded(
+        bookId: Long,
+        onProgress: ((embedded: Int, total: Int, status: String) -> Unit)?,
+    ): Int = withContext(Dispatchers.IO) {
+        embedMutex.withLock {
+            invalidateStaleEmbeddings()
+            val model = embeddingModel
+            if (!model.isAvailable()) return@withLock 0
+
+            val chunks = bookChunkDao.getChunksForBook(bookId)
+            if (chunks.isEmpty()) return@withLock 0
+            val embeddedIds = chunkEmbeddingDao.getEmbeddedChunkIds(bookId).toSet()
+            val pending = chunks.filter { it.id !in embeddedIds }
+            val total = chunks.size
+            if (pending.isEmpty()) {
+                onProgress?.invoke(total, total, model.statusText())
+                return@withLock 0
+            }
+
+            val batchSize = 32
+            var count = 0
+            var skipped = 0
+            for (batch in pending.chunked(batchSize)) {
+                val vectors = model.embed(batch.map { embedText(it) })
+                if (vectors.size == batch.size) {
+                    val entities = batch.zip(vectors).map { (chunk, vec) ->
+                        ChunkEmbeddingEntity(
+                            chunkId = chunk.id,
+                            bookId = chunk.bookId,
+                            dim = vec.size,
+                            vector = floatArrayToBytes(vec),
+                        )
+                    }
+                    chunkEmbeddingDao.insertEmbeddings(entities)
+                    count += entities.size
+                } else {
+                    // 整批失败（如内存/并发）时逐块重试，跳过坏块，避免整批卡死。
+                    Timber.w("ensureEmbedded: 批处理失败(${vectors.size}/${batch.size})，逐块重试；模型=${model.statusText()}")
+                    var consecutiveFailures = 0
+                    for ((i, chunk) in batch.withIndex()) {
+                        val one = model.embed(listOf(embedText(chunk)))
+                        if (one.size == 1) {
+                            chunkEmbeddingDao.insertEmbeddings(
+                                listOf(
+                                    ChunkEmbeddingEntity(
+                                        chunkId = chunk.id,
+                                        bookId = chunk.bookId,
+                                        dim = one[0].size,
+                                        vector = floatArrayToBytes(one[0]),
+                                    )
+                                )
+                            )
+                            count++
+                            consecutiveFailures = 0
+                        } else {
+                            skipped++
+                            consecutiveFailures++
+                            if (consecutiveFailures >= 2) {
+                                skipped += (batch.size - i - 1)
+                                break
+                            }
+                        }
+                    }
+                }
+                onProgress?.invoke(embeddedIds.size + count, total, model.statusText())
+            }
+            if (count > 0 || skipped > 0) Timber.i("Embedded $count (skipped $skipped) chunks for book $bookId")
+            count
+        }
+    }
+
+    /**
+     * 向量化时实际嵌入的文本：章节标题 + 事件摘要 + 正文拼接。
+     * 相比只嵌入正文，标题/摘要把「人物关系、情节脉络」这类高语义信号也纳入向量，
+     * 使抽象/聚合类问题（如「有哪些角色」）在语义检索下同样能命中（对齐 BM25 的 3:1 权重）。
+     */
+    private fun embedText(entity: com.ebookreader.data.local.entity.BookChunkEntity): String {
+        val parts = mutableListOf<String>()
+        if (entity.chapterTitle.isNotBlank()) parts.add(entity.chapterTitle)
+        if (entity.eventSummary.isNotBlank()) parts.add(entity.eventSummary)
+        if (entity.content.isNotBlank()) parts.add(entity.content)
+        return parts.joinToString(" ")
+    }
+
+    /** 重新向量化指定 chunk（用于摘要生成后把摘要信号回填进向量）。REPLACE 语义，无则插入。 */
+    override suspend fun reembedChunks(bookId: Long, chunkIds: List<Long>): Int = withContext(Dispatchers.IO) {
+        if (chunkIds.isEmpty()) return@withContext 0
+        embedMutex.withLock {
+            val model = embeddingModel
+            if (!model.isAvailable()) return@withLock 0
+            val idSet = chunkIds.toSet()
+            val chunks = bookChunkDao.getChunksForBook(bookId).filter { it.id in idSet }
+            if (chunks.isEmpty()) return@withLock 0
+
+            var count = 0
+            for (batch in chunks.chunked(32)) {
+                val vectors = model.embed(batch.map { embedText(it) })
+                if (vectors.size == batch.size) {
+                    val entities = batch.zip(vectors).map { (chunk, vec) ->
+                        ChunkEmbeddingEntity(
+                            chunkId = chunk.id,
+                            bookId = chunk.bookId,
+                            dim = vec.size,
+                            vector = floatArrayToBytes(vec),
+                        )
+                    }
+                    chunkEmbeddingDao.insertEmbeddings(entities)
+                    count += entities.size
+                }
+            }
+            count
+        }
+    }
+
+    override suspend fun getChunkEmbeddingCount(bookId: Long): Int =
+        chunkEmbeddingDao.getEmbeddingCount(bookId)
+
+    override suspend fun embeddingModelStatus(): String = withContext(Dispatchers.IO) {
+        embeddingModel.statusText()
+    }
+
+    override suspend fun embedTexts(texts: List<String>): List<FloatArray> = withContext(Dispatchers.IO) {
+        if (texts.isEmpty()) return@withContext emptyList()
+        val model = embeddingModel
+        if (!model.isAvailable()) return@withContext emptyList()
+        embedMutex.withLock { model.embed(texts) }
     }
 
     override suspend fun getChunkCount(bookId: Long): Int =
@@ -258,29 +417,18 @@ class ChatRepositoryImpl(
         }
         if (allChunks.isEmpty()) return@withContext emptyList()
 
-        // Build BM25 index over eventSummary (if available) + content
-        val bm25 = Bm25Index(allChunks)
+        // Score chunks: dense vector retrieval when embeddings are ready, BM25 otherwise.
+        val scored = if (embeddingsReady(bookIds)) {
+            vectorScore(queries, allChunks, bookIds)
+        } else {
+            bm25Score(queries, allChunks, topK)
+        }
 
-        // Score against all queries (union of results)
-        val scored = mutableMapOf<Long, Double>() // chunk.id -> maxScore
-        for (query in queries) {
-            // Search both eventSummary and content fields
-            val summaryResults = bm25.searchInField(query, topK * 3, useSummary = true)
-            val contentResults = bm25.search(query, topK * 3)
-
-            // Merge: eventSummary matches weighted 3:1 vs content matches
-            for ((chunk, score) in summaryResults) {
-                scored[chunk.id] = maxOf(scored[chunk.id] ?: 0.0, score * 3.0)
-            }
-            for ((chunk, score) in contentResults) {
-                scored[chunk.id] = maxOf(scored[chunk.id] ?: 0.0, score)
-            }
-
-            // Flashback penalty: reduce score for chunks containing flashback markers
-            for ((chunk, _) in summaryResults + contentResults) {
-                if (hasFlashbackMarker(chunk.content, chunk.eventSummary)) {
-                    scored[chunk.id] = (scored[chunk.id] ?: 0.0) * 0.5
-                }
+        // Flashback penalty: reduce score for chunks containing flashback markers
+        for ((chunkId, score) in scored.toList()) {
+            val entity = allChunks.find { it.id == chunkId } ?: continue
+            if (hasFlashbackMarker(entity.content, entity.eventSummary)) {
+                scored[chunkId] = score * 0.5
             }
         }
 
@@ -320,6 +468,81 @@ class ChatRepositoryImpl(
         }
     }
 
+    /** True when the dense model is loaded and (almost) every queried chunk has a vector. */
+    private suspend fun embeddingsReady(bookIds: Set<Long>): Boolean {
+        var totalChunks = 0
+        var totalEmbedded = 0
+        for (bid in bookIds) {
+            totalChunks += bookChunkDao.getChunkCount(bid)
+            totalEmbedded += chunkEmbeddingDao.getEmbeddingCount(bid)
+        }
+        if (totalChunks == 0 || totalEmbedded < totalChunks * 0.9) return false
+        return embeddingModel.isAvailable()
+    }
+
+    /** BM25 scoring over content + eventSummary, summary weighted 3:1 vs content. */
+    private fun bm25Score(
+        queries: List<String>,
+        allChunks: List<com.ebookreader.data.local.entity.BookChunkEntity>,
+        topK: Int,
+    ): MutableMap<Long, Double> {
+        val bm25 = Bm25Index(allChunks)
+        val scored = mutableMapOf<Long, Double>()
+        for (query in queries) {
+            val summaryResults = bm25.searchInField(query, topK * 3, useSummary = true)
+            val contentResults = bm25.search(query, topK * 3)
+            for ((chunk, score) in summaryResults) {
+                scored[chunk.id] = maxOf(scored[chunk.id] ?: 0.0, score * 3.0)
+            }
+            for ((chunk, score) in contentResults) {
+                scored[chunk.id] = maxOf(scored[chunk.id] ?: 0.0, score)
+            }
+        }
+        return scored
+    }
+
+    /** Dense cosine scoring: embed each query and dot-product against every chunk vector. */
+    private suspend fun vectorScore(
+        queries: List<String>,
+        allChunks: List<com.ebookreader.data.local.entity.BookChunkEntity>,
+        bookIds: Set<Long>,
+    ): MutableMap<Long, Double> {
+        val scored = mutableMapOf<Long, Double>()
+        val embeddings = chunkEmbeddingDao.getEmbeddingsForBooks(bookIds)
+            .associate { it.chunkId to bytesToFloatArray(it.vector) }
+        if (embeddings.isEmpty()) return scored
+
+        for (query in queries) {
+            val qv = embedMutex.withLock { embeddingModel.embed(listOf(query)) }.firstOrNull() ?: continue
+            for (chunk in allChunks) {
+                val cv = embeddings[chunk.id] ?: continue
+                val sim = dot(qv, cv).toDouble()
+                if (sim > 0.0) scored[chunk.id] = maxOf(scored[chunk.id] ?: 0.0, sim)
+            }
+        }
+        return scored
+    }
+
+    private fun dot(a: FloatArray, b: FloatArray): Float {
+        var s = 0f
+        val n = minOf(a.size, b.size)
+        for (i in 0 until n) s += a[i] * b[i]
+        return s
+    }
+
+    private fun floatArrayToBytes(f: FloatArray): ByteArray {
+        val buf = ByteBuffer.allocate(f.size * 4).order(ByteOrder.LITTLE_ENDIAN)
+        for (x in f) buf.putFloat(x)
+        return buf.array()
+    }
+
+    private fun bytesToFloatArray(b: ByteArray): FloatArray {
+        val buf = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN)
+        val f = FloatArray(b.size / 4)
+        for (i in f.indices) f[i] = buf.getFloat()
+        return f
+    }
+
     /**
      * For each selected chunk, include its immediate neighbors (±1) to ensure
      * the AI sees surrounding context, not just the exact keyword match.
@@ -340,27 +563,27 @@ class ChatRepositoryImpl(
             indexMap[chunk.bookId to chunk.chunkIndex] = chunk
         }
 
-        val expanded = mutableSetOf<Long>() // chunk id
-        for (chunk in selected) {
-            expanded.add(chunk.id)
-            // Add ±1 neighbors (if they exist)
-            for (offset in listOf(-1, 1)) {
-                val neighbor = indexMap[chunk.bookId to (chunk.chunkIndex + offset)]
-                if (neighbor != null) {
-                    expanded.add(neighbor.id)
-                }
+        val seen = mutableSetOf<Long>() // chunk id
+        val result = mutableListOf<BookChunk>()
+        fun addEntity(e: com.ebookreader.data.local.entity.BookChunkEntity?) {
+            if (e != null && seen.add(e.id)) {
+                val (title, author) = bookMeta[e.bookId] ?: ("" to "")
+                result.add(e.toDomain(bookTitle = title, bookAuthor = author))
             }
         }
 
-        // Convert back, maintaining original sort order + neighbors
-        val result = mutableListOf<BookChunk>()
-        for (entry in allChunks) {
-            if (entry.id in expanded) {
-                val (title, author) = bookMeta[entry.bookId] ?: ("" to "")
-                result.add(entry.toDomain(bookTitle = title, bookAuthor = author))
-            }
+        // Pass 1: 保留全部被选中的块（按相关性顺序），确保 topK 个去重窗口都进入候选，
+        // 避免相邻块「挤掉」其他窗口，导致热点章节垄断、跨章召回不足。
+        for (chunk in selected) {
+            addEntity(indexMap[chunk.bookId to chunk.chunkIndex])
         }
-        return result.take(maxResults * 3) // allow up to 3x for neighbor expansion
+        // Pass 2: 仅当候选不足 maxResults（小书 / 命中少）时，用 ±1 相邻块补齐上下文。
+        for (chunk in selected) {
+            if (result.size >= maxResults) break
+            addEntity(indexMap[chunk.bookId to (chunk.chunkIndex - 1)])
+            addEntity(indexMap[chunk.bookId to (chunk.chunkIndex + 1)])
+        }
+        return result.take(maxResults)
     }
 
     /** Flashback keyword patterns — content containing these is likely a flashback/recall, not an event. */
@@ -396,12 +619,18 @@ class ChatRepositoryImpl(
             actualExt == "txt" -> "TXT"
             else -> storedFormat.uppercase()
         }
-        return when (format) {
+        val text = when (format) {
             "TXT" -> extractTxt(file)
             "EPUB" -> extractEpub(file)
             "PDF" -> extractPdf(file)
             else -> tryExtractByExtension(file)
         }
+        // 自定义抽取（OPF/spine → 全量 HTML 兜底）仍取空时，改用 Readium（与阅读器同源）
+        // 按 readingOrder 抽取全文：这类 EPUB 阅读器能正常渲染、只是结构特殊，自定义解析读不到正文。
+        if (text.isBlank() && format == "EPUB") {
+            return extractEpubByReadium(file)
+        }
+        return text
     }
 
     private suspend fun tryExtractByExtension(file: File): String {
@@ -568,16 +797,27 @@ class ChatRepositoryImpl(
 
     private fun extractEpub(file: File): String {
         try {
-            val opfContent = readOpfFromEpub(file) ?: return ""
-            val opfDir = extractOpfDir(opfContent.first)
-            val xml = opfContent.second
-
-            val items = parseManifest(xml)
-            val spineIds = parseSpine(xml)
-            if (spineIds.isEmpty()) return ""
-
-            val spineHrefs = spineIds.mapNotNull { items[it] }
-            return readSpineTexts(file, opfDir, spineHrefs)
+            var spineText = ""
+            val opfContent = readOpfFromEpub(file)
+            if (opfContent != null) {
+                val opfDir = extractOpfDir(opfContent.first)
+                val xml = opfContent.second
+                val items = parseManifest(xml)
+                val spineIds = parseSpine(xml)
+                if (spineIds.isNotEmpty()) {
+                    val spineHrefs = spineIds.mapNotNull { items[it] }
+                    spineText = readSpineTexts(file, opfDir, spineHrefs)
+                }
+            }
+            // 兜底：遍历所有 XHTML/HTML 文件拼接正文。若 spine 路径匹配只命中部分章节（例如只
+            // 取到封面/版权页等前言），正文会比全量兜底明显偏短，此时改用全量兜底，保证拿到完整
+            // 正文（否则关键词会只剩「出版社」等前言通用词）。
+            val fallback = extractEpubAllHtml(file)
+            if (fallback.length > spineText.length) return fallback
+            if (spineText.isNotBlank()) return spineText
+            if (fallback.isNotBlank()) return fallback
+            Timber.w("EPUB extraction empty: ${file.name}")
+            return ""
         } catch (e: Exception) {
             Timber.e(e, "EPUB extraction failed")
             return ""
@@ -667,6 +907,72 @@ class ChatRepositoryImpl(
         return sb.toString()
     }
 
+    /** 兜底抽取：不依赖 OPF/spine，遍历 zip 内所有 XHTML/HTML 文件，按文件名排序后拼接纯文本。 */
+    private fun extractEpubAllHtml(file: File): String {
+        val htmlFiles = mutableListOf<Pair<String, String>>() // (name, html)
+        try {
+            ZipInputStream(FileInputStream(file)).use { zip ->
+                var entry = zip.nextEntry
+                while (entry != null) {
+                    if (!entry.isDirectory) {
+                        val name = entry.name
+                        val lower = name.lowercase()
+                        if (lower.endsWith(".xhtml") || lower.endsWith(".html") || lower.endsWith(".htm")) {
+                            try {
+                                htmlFiles.add(name to String(zip.readBytes(), Charsets.UTF_8))
+                            } catch (_: Exception) {}
+                        }
+                    }
+                    entry = zip.nextEntry
+                }
+            }
+        } catch (_: Exception) {
+            return ""
+        }
+        val sb = StringBuilder()
+        for ((_, html) in htmlFiles.sortedBy { it.first }) {
+            val text = Jsoup.parse(html).text()
+            if (text.isNotBlank()) {
+                if (sb.isNotEmpty()) sb.append("\n\n")
+                sb.append(text)
+            }
+        }
+        return sb.toString()
+    }
+
+    /** 兜底全文抽取：用 Readium 按 readingOrder 读全文，覆盖无导航/结构特殊的 EPUB。 */
+    private suspend fun extractEpubByReadium(file: File): String {
+        return try {
+            val app = context.applicationContext as? Application ?: return ""
+            val httpClient = DefaultHttpClient()
+            val assetRetriever = AssetRetriever(app.contentResolver, httpClient)
+            val pdfFactory = PdfiumDocumentFactory(app)
+            val parser = DefaultPublicationParser(app, httpClient, assetRetriever, pdfFactory)
+            val opener = PublicationOpener(parser)
+            val url = file.toUrl(isDirectory = false)
+            val asset = assetRetriever.retrieve(url).getOrElse { return "" }
+            val publication = try {
+                opener.open(asset, allowUserInteraction = false).getOrElse { asset.close(); return "" }
+            } catch (_: Exception) { asset.close(); return "" }
+
+            val sb = StringBuilder()
+            try {
+                for (link in publication.readingOrder) {
+                    val bytes = publication.get(link)?.read()?.getOrElse { continue } ?: continue
+                    val text = Jsoup.parse(String(bytes, Charsets.UTF_8)).text().trim()
+                    if (text.isNotBlank()) {
+                        if (sb.isNotEmpty()) sb.append("\n\n")
+                        sb.append(text)
+                    }
+                }
+            } finally {
+                try { publication.close() } catch (_: Exception) {}
+                try { asset.close() } catch (_: Exception) {}
+            }
+            sb.toString()
+        } catch (_: Exception) { "" }
+    }
+
     // ── EPUB 导航（与阅读器目录一致）──────────────────────────────────────
 
     /**
@@ -684,10 +990,19 @@ class ChatRepositoryImpl(
         if (actualFormat == "EPUB") {
             // 优先用 Readium 读 EPUB 导航（与阅读器目录完全一致）
             val byReadium = extractEpubChaptersByReadium(file)
-            if (byReadium.isNotEmpty()) return byReadium
             // 手动解析导航兜底（同样读目录，不用正则反推）
-            val byToc = extractEpubChaptersByToc(file)
-            if (byToc.isNotEmpty()) return byToc
+            val byToc = if (byReadium.isEmpty()) extractEpubChaptersByToc(file) else emptyList()
+            val tocChapters = byReadium.ifEmpty { byToc }
+            // 目录可能只指向固定版式图片页/版权页，正文在目录未引用的「孤儿」文件里
+            // （混排 EPUB 常见：正文 xhtml 不在 nav/toc 中）。此时按目录切分几乎抽不到正文，
+            // 关键词会只剩出版社信息。若目录抽取总字数不足全文一半，回退用全文。
+            if (tocChapters.isNotEmpty()) {
+                val tocLength = tocChapters.sumOf { it.second.length }
+                if (fullText.isNotBlank() && tocLength < fullText.length / 2) {
+                    return listOf("" to fullText)
+                }
+                return tocChapters
+            }
             // 没有导航：整本作为一章
             return listOf("" to fullText)
         }

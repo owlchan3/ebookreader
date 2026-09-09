@@ -2,7 +2,7 @@
 
 一款 Android 电子书阅读器，基于 **Kotlin + Jetpack Compose + Material 3** 构建，阅读内核使用 [Readium Kotlin Toolkit](https://github.com/readium/kotlin-toolkit) 3.3.0（源码内置，见 `readium-kit/`）。
 
-除了阅读本身，还内置了 **AI 智能助手（基于书籍内容的检索问答）**、**AI 拆书**、**智能推荐**、**阅读统计**、**标签管理**、**数据备份与恢复** 等一整套功能。
+除了阅读本身，还内置了 **AI 智能助手（基于书籍内容的检索问答）**、**AI 拆书**、**智能推荐**、**阅读统计**、**标签管理**、**数据备份与恢复** 等一整套功能，并支持 **端侧关键词提取、语义检索（本地嵌入模型）与关键词词云**。
 
 ---
 
@@ -38,19 +38,22 @@
 - 元数据展示（书名 / 作者 / 格式 / 文件大小 / 累计阅读）
 - 继续阅读 / 开始阅读
 - AI 生成简介
+- 关键词词云（本地分词提取关键词，可一键生成 AI 简介）
 - 标签添加 / 移除 / 新建
 - 相关书籍（搜索多选添加）
+- 推荐书籍（开启智能推荐后显示，含「相关书籍 ↔ 推荐书籍」切换）
 - 编辑书籍信息（书名 / 作者 / 简介）
 - 删除书籍（不删除源文件）
 
 ### AI 智能助手（对话）
 - 多会话管理（新建 / 切换 / 删除 / 历史列表）
-- 基于书籍内容的检索问答：查询扩展 → BM25 检索 → LLM 重排 → 流式回答
+- 基于书籍内容的检索问答：查询扩展 → **混合检索（BM25 关键词 + 端侧语义向量）** → LLM 重排 → 流式回答
+- 端侧嵌入模型 bge-small-zh（ONNX Runtime），缺失时自动回退到纯 BM25，不影响功能
 - 流式输出与「思考过程」展示（可展开/收起）
 - 跨书导入参考资料（已拆书优先标记）
 - 指定章节精确问答（章节多选筛选，绕过检索直接按原文回答）
 - 时间类问题按原文顺序排序
-- 诊断信息面板（索引状态 / 检索管线 / 分块详情 / tokens 估算）
+- 诊断信息面板（索引状态 / 检索管线 / 嵌入模型状态 / 分块详情 / tokens 估算）
 - 导出对话（系统分享）
 
 ### AI 拆书
@@ -63,7 +66,10 @@
 
 ### 智能推荐
 - 本地书推荐（题材 / 同作者 / 随机）
-- 联网书推荐（Google Books / Open Library / SaltyLeo / 自定义网文搜索 / Pixiv）
+- 联网书推荐（Google Books / Open Library / SaltyLeo / Xiu2 书源 / 自定义网文搜索 / Pixiv）
+- 五路相关性评分（标签 / 作者 / 书名 / 简介 / 正文关键词加权）
+- 关键词共现嵌入：用「书 → 关键词」共现索引扩展种子关键词，挖掘同题材冷启动关联
+- 单本推荐「先确认后关联」：先在平台命中同一本书，再取其完整分类做定向二次检索，降低噪声
 - 下拉刷新、逐条「不感兴趣」
 - 联网书外链打开
 
@@ -82,7 +88,7 @@
 - 关于：版本 / 开源许可 / 使用帮助
 
 ### 其他
-- 内置开源许可列表（可展开完整许可文本）
+- 内置开源许可（纯文本，可长按选中复制，附录含完整许可全文）
 - 内置使用帮助
 - 深浅色主题（自动跟随系统）
 
@@ -95,8 +101,8 @@
 | EPUB | 重排版 + 固定版式，导入时做兼容性修复（未转义 `&`、DRM 剥离、多看文件名混淆、超大图片降采样等） |
 | PDF | 经 Pdfium 渲染 |
 | TXT | 自动检测编码（UTF-8/GBK/GB18030/GB2312/Big5 + UTF-16 BOM）→ 章节识别 → 转换为 EPUB 阅读 |
-| DOCX | 直接解析 `word/document.xml` 提取文本 → 转换为 EPUB 阅读（无 Apache POI 依赖） |
-| `.doc` | ❌ 不支持，提示转成 `.docx` / `.txt` |
+| DOCX | 直接解析 `word/document.xml` 提取文本（`XmlPullParser`，无 POI）→ 转换为 EPUB 阅读 |
+| `.doc` | 用 Apache POI（HWPF）提取纯文字 → 走 TXT 管线 → EPUB（仅保留文字，无格式） |
 
 > 注：`BookImporter` 的格式识别虽枚举了 `CBZ` / `MOBI` / `AZW` 扩展名，但应用仅集成了 Readium 的重排版 / 固定版式 / Pdfium 三个导航器，未集成对应解析适配器，这些格式实际无法被打开。
 
@@ -109,7 +115,7 @@
 | 语言 | Kotlin | 2.3.20 |
 | UI | Jetpack Compose（Material 3） | Compose 1.10.5 / Material3 1.4.0 |
 | 阅读内核 | Readium Kotlin Toolkit | 3.3.0 |
-| 架构组件 | Navigation Compose / Lifecycle | 2.9.7 / 2.10.0 |
+| 架构组件 | Navigation Compose / Lifecycle / Activity Compose | 2.9.7 / 2.10.0 / 1.13.0 |
 | 数据库 | Room（KSP） | 2.8.4 |
 | 异步 | Kotlin Coroutines | 1.10.2 |
 | 序列化 | kotlinx.serialization / kotlinx.datetime | 1.10.0 / 0.7.1 |
@@ -118,9 +124,14 @@
 | 网络 | OkHttp | 4.12.0 |
 | HTML 解析 | Jsoup | 1.22.2 |
 | 日志 | Timber | 5.0.1 |
+| 端侧嵌入 | ONNX Runtime | 1.22.0 |
+| 文档解析 | Apache POI（scratchpad） | 5.2.5 |
+| 繁简转换 | OpenCC4j | 1.14.0 |
 | 其他 | AndroidPdfViewer（PDF 渲染） / desugar_jdk_libs | 3.2.8 / 2.1.5 |
 
 构建工具链：Gradle 9.1.0 / AGP 9.0.0 / KSP 2.3.4 / JDK 17。
+
+> 发布版仅打包真机 ABI（`arm64-v8a` / `armeabi-v7a`），剔除 x86/x86_64 模拟器 ABI，显著减小 ONNX Runtime 原生库带来的 APK 体积。
 
 ---
 
@@ -132,11 +143,12 @@
 |---|---|
 | **UI 层** | `ui/*Screen` · `ui/*ViewModel` · `ui/*Engine`<br>通过 `Injector` 获取 Repository / DAO |
 | **Domain 层** | `domain/model`（纯 Kotlin 领域模型）<br>`domain/repository`（接口，不依赖 Room） |
-| **Data 层** | `data/local`（Entity + DAO + AppDatabase）<br>`data/mapper`（Entity ↔ Domain 映射）<br>`data/repository`（Repository 实现）<br>`data/network`（外部服务客户端）<br>`data/importer` · `data/backup` |
+| **Data 层** | `data/local`（Entity + DAO + AppDatabase）<br>`data/mapper`（Entity ↔ Domain 映射）<br>`data/repository`（Repository 实现）<br>`data/network`（外部服务客户端）<br>`data/ml`（关键词提取 + 端侧嵌入）<br>`data/importer` · `data/backup` |
 
-- 依赖注入：`Injector` 为 Kotlin `object`（进程级服务定位器），`init(context)` 一次性装配数据库、5 个 Repository 与 3 个网络客户端。
+- 依赖注入：`Injector` 为 Kotlin `object`（进程级服务定位器），`init(context)` 一次性装配数据库、6 个 Repository（Book / Tag / Bookmark / Annotation / Chat / Keyword）与 DeepSeek、CloudTTS 两个网络客户端。
 - 列表类查询普遍返回 `Flow<List<T>>`，写操作与单条查询用 `suspend`。
-- DAO 中的 3 类数据（拆书结果、每日阅读统计）由 UI 层直接经 `Injector.appDatabase().xxxDao()` 访问，未封装 Repository。
+- 拆书结果、每日阅读统计等数据由 UI 层直接经 `Injector.appDatabase().xxxDao()` 访问，未封装 Repository。
+- 关键词提取在后台 `KeywordAutoGenerator` 中执行，结果写入 `book_keywords`，供词云与推荐复用。
 
 ## 目录结构
 
@@ -144,24 +156,27 @@
 ebook-reader/
 ├── app/
 │   └── src/main/
+│       ├── assets/              # 内置模型与词典（见「离线数据」）
 │       ├── java/com/ebookreader/
 │       │   ├── data/
 │       │   │   ├── local/          # Room：entity / dao / AppDatabase
 │       │   │   ├── repository/     # Repository 接口实现
-│       │   │   ├── network/        # 外部服务客户端（AI / 推荐 / TTS / Pixiv / 网文）
-│       │   │   ├── importer/       # BookImporter（导入、TXT/DOCX→EPUB、EPUB 修复）
+│       │   │   ├── network/        # 外部服务客户端（AI / 推荐 / TTS / Pixiv / 网文 / 书源）
+│       │   │   ├── ml/             # KeywordExtractor / EmbeddingModel（端侧）
+│       │   │   ├── importer/       # BookImporter（导入、TXT/DOCX/DOC→EPUB、EPUB 修复）
 │       │   │   ├── backup/         # BackupManager（导出/导入备份）
 │       │   │   └── mapper/         # Entity ↔ Domain 映射
 │       │   ├── domain/
 │       │   │   ├── model/          # 纯 Kotlin 领域模型
 │       │   │   └── repository/     # Repository 接口
+│       │   ├── background/         # KeywordAutoGenerator（后台关键词生成）
 │       │   ├── di/                 # Injector
 │       │   └── ui/
 │       │       ├── bookshelf/      # 书库（我的书架）
 │       │       ├── reader/         # 阅读器 + TtsPlaybackService + 划线样式
-│       │       ├── detail/         # 书籍详情
+│       │       ├── detail/         # 书籍详情 + 词云
 │       │       ├── settings/       # 设置
-│       │       ├── recommend/      # 智能推荐
+│       │       ├── recommend/      # 智能推荐 + RecommendationScorer
 │       │       ├── chat/           # AI 对话
 │       │       ├── decompose/      # AI 拆书
 │       │       ├── stats/          # 阅读统计
@@ -176,6 +191,7 @@ ebook-reader/
 │       ├── res/
 │       └── AndroidManifest.xml
 ├── readium-kit/        # Readium Kotlin Toolkit 3.3.0 源码（BSD，内置）
+├── tools/              # download_embedding_model.ps1（重下嵌入模型脚本）
 ├── gradle/             # Gradle Wrapper 与版本目录（libs.versions.toml）
 ├── build.gradle.kts
 ├── settings.gradle.kts
@@ -188,11 +204,11 @@ ebook-reader/
 
 ## 数据模型（Room）
 
-数据库名 `ebook_reader.db`，当前版本 **19**。共 14 张表：
+数据库名 `ebook_reader.db`，当前版本 **22**。共 16 张表：
 
 | 表 | 用途 |
 |---|---|
-| `books` | 书籍元数据与阅读进度（标题/作者/简介/封面/文件路径/格式/当前页/定位器/累计时长等） |
+| `books` | 书籍元数据与阅读进度（标题/作者/简介/封面/文件路径/格式/当前页/定位器/累计时长/总字数等） |
 | `tags` | 标签（名称唯一） |
 | `book_tag_cross_ref` | 书 ↔ 标签 多对多关联 |
 | `book_relation_cross_ref` | 相关书籍关联（自动/手动/屏蔽） |
@@ -203,6 +219,8 @@ ebook-reader/
 | `conversations` | AI 对话会话 |
 | `chat_messages` | 聊天消息 |
 | `book_chunks` | 正文切块（RAG 检索用，含字符偏移与事件摘要） |
+| `chunk_embeddings` | 正文分块的端侧向量（BLOB，语义检索用） |
+| `book_keywords` | 每本书提取的关键词（词 + 权重 + 排名，供词云与推荐） |
 | `daily_reading_sessions` | 每日阅读总时长 |
 | `daily_book_reading` | 每本书每日阅读时长 |
 | `book_decomposition` | AI 拆书结果（逐章梗概/全书总结/大纲/深度模块等，JSON 存储） |
@@ -217,11 +235,11 @@ ebook-reader/
 |---|---|
 | AI 对话 / 拆书 | OpenAI 兼容 `POST /chat/completions`，默认 `https://api.deepseek.com/v1`、模型 `deepseek-chat`（支持 `deepseek-reasoner` 的思维链；预设另含 claude-sonnet-5 / claude-opus-5 / gpt-4o / gpt-4o-mini） |
 | 云端 TTS | OpenAI 兼容 `/audio/speech`（兼容 SiliconFlow / Moonshot / 火山 Doubao / 小米 MiMo 等） |
-| 出版书推荐 | Google Books API、Open Library、SaltyLeo（豆瓣数据） |
+| 出版书推荐 | Google Books API、Open Library、SaltyLeo（豆瓣数据）、Xiu2 书源 |
 | 网文搜索 | 解析笔趣阁类站点搜索页（默认 `https://www.52bqg.net`，可自定义） |
 | Pixiv 小说 | Pixiv App API（需用户填写 refresh_token） |
 
-推荐功能返回的都是**真实联网数据源**的书，不依赖 LLM 生成条目。
+推荐功能返回的都是**真实联网数据源**的书，不依赖 LLM 生成条目。AI 语义检索在本地完成（不联网），仅最终回答需调用 LLM。
 
 ---
 
@@ -243,21 +261,36 @@ ebook-reader/
 # 输出：app/build/outputs/apk/release/app-release.apk
 ```
 
-## 离线词典数据
+## 离线数据
 
-「词典」功能依赖本地离线词库（约 49 MB，**未纳入 Git 仓库**）。首次构建前需手动放入以下两个文件：
+应用内置两类本地数据，均放在 `app/src/main/assets/` 下：
+
+### 离线词典（约 49 MB，**未纳入 Git**）
+
+「词典」功能依赖本地离线词库，仓库不包含，首次构建前需手动放入：
 
 | 文件 | 用途 | 数据来源 |
 |---|---|---|
 | `app/src/main/assets/dictionaries/moedict.jsonl` | 中文-中文词典（教育部《重編國語辭典修訂本》，萌典整理版，简体已转换） | 萌典 [g0v/moedict-data](https://github.com/g0v/moedict-data) |
 | `app/src/main/assets/dictionaries/ecdict.jsonl` | 英汉词典（ECDICT 常用词子集） | [skywind3000/ECDICT](https://github.com/skywind3000/ECDICT) |
 
-两文件为 JSONL（每行一条，`\t` 分隔），格式：
+两文件为 JSONL（每行一条，`\t` 分隔）：
 
-- `moedict.jsonl`：`简体 \t 繁体 \t 异读JSON数组`，数组形如 `[{"p":"拼音","d":[{"d":"释义","t":"词性","q":["例句","典故"]}]}]`
+- `moedict.jsonl`：`简体 \t 繁体 \t 异读JSON数组`
 - `ecdict.jsonl`：`小写词头 \t {"w":"原始词头","p":"音标","t":"中文翻译(多行)"}`
 
 未放入数据文件时，词典查询会提示「未找到」，其余功能不受影响。
+
+### 端侧模型与分词词库（约 38 MB，**已纳入 Git**）
+
+`app/src/main/assets/ml/` 下的嵌入模型（`bge-small-zh.onnx`）、BERT 词表（`vocab.txt`）以及 jieba 分词/新词词库（`jieba_dict.txt`、`jieba_idf.txt`、`thuocl.txt`、停用词表、姓氏表等）随仓库一并提交。其中嵌入模型也可通过脚本重新下载：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\download_embedding_model.ps1
+# 默认走 hf-mirror.com 镜像，可设 $env:HF_ENDPOINT 切换；来源 Xenova/bge-small-zh-v1.5
+```
+
+缺失或损坏时，语义检索自动回退为 BM25，关键词提取与词云功能不受影响。
 
 ## Release 签名
 
@@ -280,10 +313,12 @@ ebook-reader/
 
 ## 已知限制 / 注意事项
 
-- 章节的「刷新 / 合并 / 删除」仅对 **TXT / DOCX 导入**（已转换为 EPUB）的书籍可用；原生 EPUB / PDF 不支持。
-- 选中文字（复制 / 分享 / 划线 / 批注）在 **翻页、滚动** 两种模式下均可用；翻页模式的跨栏选择闪烁已通过触控边缘钳制修复。
+- 章节的「刷新 / 合并 / 删除」仅对 **TXT / DOCX / DOC 导入**（已转换为 EPUB）的书籍可用；原生 EPUB / PDF 不支持。
+- `.doc` 仅提取纯文字（无格式），更复杂的排版建议先转成 `.docx` / `.txt`。
+- 选中文字（复制 / 分享 / 划线 / 批注）在 **翻页、滚动** 两种模式下均可用。
 - 拆书档位参数（精简/标准/深度）已定义，但当前拆书引擎固定按「深度」档运行。
 
 ## 许可
 
 - `readium-kit/` 下的 Readium Kotlin Toolkit 采用 [BSD 许可证](readium-kit/LICENSE)。
+- 应用内「设置 → 开源许可」列出全部开源组件与数据资源及其许可（纯文本 + 附录全文）。

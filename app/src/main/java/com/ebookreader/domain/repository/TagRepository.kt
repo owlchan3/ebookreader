@@ -8,6 +8,8 @@ interface TagRepository {
     fun getAllTags(): Flow<List<Tag>>
     /** 确保「已阅」特殊标签存在，返回其 id。 */
     suspend fun ensureReadTagExists(): Long
+    /** 确保「置顶」特殊标签存在，返回其 id。 */
+    suspend fun ensurePinTagExists(): Long
     suspend fun getTagById(tagId: Long): Tag?
     suspend fun insertTag(tag: Tag): Long
     suspend fun updateTag(tag: Tag)

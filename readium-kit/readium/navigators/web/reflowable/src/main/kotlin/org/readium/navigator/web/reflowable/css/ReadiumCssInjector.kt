@@ -105,6 +105,18 @@ internal data class ReadiumCssInjector(
                     """.trimMargin()
                 )
 
+                // Force the page background transparent so the themed WebView background shows
+                // through, even when a book hard-codes a solid (e.g. white) background on
+                // <html>/<body>. This removes the solid block under the text in any theme while
+                // keeping the book's own text/emphasis colors intact (overridePublisherColors=false).
+                add(
+                    """
+                <style>
+                    html, body { background-color: transparent !important; }
+                </style>
+                    """.trimIndent()
+                )
+
                 if (!hasStyles) {
                     add(stylesheetLink(defaultCss))
                 }
@@ -116,6 +128,15 @@ internal data class ReadiumCssInjector(
             endHeadIndex,
             "\n" + buildList {
                 add(stylesheetLink(afterCss))
+
+                // 全局强制书写模式：仅 <html> 上的 inline 覆盖会被书籍自身 CSS（如 body/目录页的
+                // writing-mode: vertical-rl）再次覆盖，导致繁体竖排书强制横排后目录页等仍竖排甚至空白。
+                // 这里对所有元素统一强制（writing-mode 可继承，但会被子元素自带规则覆盖）；
+                // 横排时同时锁定 direction: ltr，避免残留「右起」方向使目录页反排。
+                userProperties.overrides["writing-mode"]?.let { wm ->
+                    val directionRule = if (wm == "horizontal-tb") " direction: ltr !important;" else ""
+                    add("<style>:root, :root * { writing-mode: $wm !important;$directionRule }</style>")
+                }
 
                 if (fontsInjectableCss.isNotEmpty()) {
                     add(

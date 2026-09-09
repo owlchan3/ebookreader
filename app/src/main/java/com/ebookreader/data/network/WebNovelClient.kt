@@ -31,7 +31,9 @@ class WebNovelClient(private val baseUrls: List<String>) {
                 }
                 if (out.size >= maxResults) break
             }
-            out.take(maxResults)
+            val results = out.take(maxResults)
+            // 按搜索返回顺序给热度：越靠前越热门（接进推荐打分的热度项）
+            results.mapIndexed { i, b -> b.copy(popularity = (results.size - i).toDouble().coerceAtMost(6.0)) }
         }
 
     /** 测试某个地址是否生效（搜索「小说」，返回是否有结果）。 */
