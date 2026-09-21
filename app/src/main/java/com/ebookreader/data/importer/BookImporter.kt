@@ -831,12 +831,14 @@ $metaCreator$metaDescription  </metadata>
 
     /**
      * 生成繁/简转换后的 EPUB 副本：只转换 XHTML/HTML 的文本节点，保留标签/样式/图片/目录结构。
-     * 结果按「源文件 + 转换方向」缓存（同名 .t2s.epub / .s2t.epub），重复调用直接复用。
+     * 结果按「源文件 + 转换方向」缓存（同名 .t2s2.epub / .s2t2.epub），重复调用直接复用。
+     * 后缀中的版本号用于在转换逻辑变更后让旧副本自动失效（v2 修正了文本节点换行与缩进被压成空格的问题）。
      *
      * @param toSimplified true=繁→简，false=简→繁
      */
     fun convertEpubChinese(epubFile: File, toSimplified: Boolean): File {
-        val suffix = if (toSimplified) "t2s" else "s2t"
+        // 结尾数字为转换逻辑版本号；改动转换实现时递增，避免复用旧逻辑生成的副本。
+        val suffix = if (toSimplified) "t2s2" else "s2t2"
         val outFile = File(epubFile.parentFile, "${epubFile.nameWithoutExtension}.$suffix.epub")
         if (outFile.exists() && outFile.lastModified() >= epubFile.lastModified()) {
             return outFile
@@ -895,7 +897,9 @@ $metaCreator$metaDescription  </metadata>
                 if (node is TextNode) {
                     val parentName = node.parent()?.nodeName()?.lowercase()
                     if (parentName != "script" && parentName != "style") {
-                        val original = node.text()
+                        // 必须用 wholeText 取原始文本：TextNode.text() 会把换行与连续空白
+                        // 归一化成一个空格，写回后换行即丢失（在 white-space:pre-wrap 的书籍上肉眼可见）。
+                        val original = node.wholeText
                         val converted = convertChinese(original, toSimplified)
                         if (converted != original) node.text(converted)
                     }
