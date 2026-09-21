@@ -341,16 +341,19 @@ object DecomposeEngine {
         decompApiKey: String, decompBaseUrl: String,
     ): String {
         for (attempt in 1..3) {
-            val raw = deepSeekClient.complete(
+            val result = deepSeekClient.completeWithMeta(
                 prompt = mapPrompt + "\n\n章节标题：$title\n章节内容：\n$content",
                 systemPrompt = systemPrompt,
                 model = mapModel,
                 apiKeyOverride = decompApiKey,
                 baseUrlOverride = decompBaseUrl,
-                // deep 档每章输出「梗概+关键事件+人物」三段，默认 2048 可能截断最后一段
-                maxTokens = 4096,
-            ).getOrNull()?.trim().orEmpty()
-            if (raw.isNotBlank()) return raw
+                // deep 档每章输出「梗概+关键事件+人物」三段，单轮预算给足
+                maxTokens = 8192,
+            ).getOrNull() ?: continue
+            val raw = result.content.trim()
+            // 被截断的内容也是非空的 —— 只看 isNotBlank 会把半截结果当成功收下，
+            // 下面这个 truncated 判断才是重试真正生效的关键。
+            if (raw.isNotBlank() && !result.truncated) return raw
         }
         return ""
     }
@@ -382,16 +385,19 @@ object DecomposeEngine {
         val prompt = "以下是这本书各章的梗概。请生成「${module.title}」这部分内容：${module.instruction}\n" +
             "直接输出内容本身，不要输出「${module.title}」这个标题，也不要任何解释。\n\n$chaptersText"
         for (attempt in 1..3) {
-            val raw = deepSeekClient.complete(
+            val result = deepSeekClient.completeWithMeta(
                 prompt = prompt,
                 systemPrompt = systemPrompt,
                 model = null,
                 apiKeyOverride = "",
                 baseUrlOverride = "",
-                // 单模块输出可能较长（如人物小传/世界观），给足预算避免截断
+                // 单模块输出可能较长（如人物小传/世界观），单轮预算给足。
+                // 注意：这个值会被原样发给服务端，超出所用端点的合法区间会被拒绝（HTTP 400）。
                 maxTokens = 12000,
-            ).getOrNull()?.trim().orEmpty()
-            if (raw.isNotBlank()) return raw
+            ).getOrNull() ?: continue
+            val raw = result.content.trim()
+            // 同 generateChapter：截断但非空的结果不能算成功
+            if (raw.isNotBlank() && !result.truncated) return raw
         }
         return ""
     }
