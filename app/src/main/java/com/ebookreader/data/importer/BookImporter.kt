@@ -1518,7 +1518,7 @@ $metaCreator$metaDescription$metaCover  </metadata>
 
     private fun detectFormat(extension: String) = when (extension.lowercase()) {
         "epub" -> "EPUB"; "pdf" -> "PDF"; "cbz" -> "CBZ"; "mobi" -> "MOBI"
-        "azw", "azw3" -> "AZW"; "txt" -> "TXT"; "docx" -> "DOCX"; "doc" -> "DOC"
+        "azw" -> "AZW"; "azw3" -> "AZW3"; "txt" -> "TXT"; "docx" -> "DOCX"; "doc" -> "DOC"
         else -> extension.uppercase()
     }
 

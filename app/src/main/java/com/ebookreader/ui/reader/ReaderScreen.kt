@@ -839,7 +839,7 @@ fun ReaderScreen(
                     Text("书签", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.weight(1f))
                     TextButton(onClick = {
-                        viewModel.addBookmark(pageLabel.ifEmpty { "书签 ${bookmarks.size + 1}" })
+                        viewModel.addBookmark()
                     }) { Text("+ 当前页") }
                 }
                 Spacer(Modifier.height(8.dp))

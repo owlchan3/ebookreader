@@ -16,6 +16,7 @@ import com.ebookreader.domain.model.TagToken
 import com.ebookreader.domain.model.TokenType
 import com.ebookreader.domain.repository.BookRepository
 import com.ebookreader.domain.repository.TagRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -37,6 +38,18 @@ class BookshelfViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val bookRepository: BookRepository = Injector.bookRepository()
     private val tagRepository: TagRepository = Injector.tagRepository()
+
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            // 书签位置提示改版：把旧版「189 / 1987」形式的标题一次性换算为百分比。
+            // 书库是起始页，必定先于其它页面创建，放在这里可保证只跑一次。
+            val apiKeyManager = Injector.apiKeyManager()
+            if (!apiKeyManager.isBookmarkLabelMigrated()) {
+                runCatching { Injector.bookmarkRepository().migrateTitlesToPercent() }
+                apiKeyManager.markBookmarkLabelMigrated()
+            }
+        }
+    }
 
     private val _sortMode = MutableStateFlow(SortMode.RECENT)
     val sortMode: StateFlow<SortMode> = _sortMode.asStateFlow()

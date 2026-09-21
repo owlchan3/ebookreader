@@ -975,12 +975,23 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     // Bookmarks (page notes)
-    fun addBookmark(title: String, note: String = "") {
+
+    /**
+     * 全书阅读进度百分比标签（与书库封面口径一致）；总页数未知时返回空串。
+     * 注意与顶部页码标签 [currentPageLabel]（形如 "189 / 1987"）区分：那个显示真实页码，不做换算。
+     */
+    private fun progressPercentLabel(pageIndex: Int, total: Int): String =
+        if (total <= 0) "" else "${(pageIndex + 1).coerceAtMost(total) * 100 / total}%"
+
+    /** 添加书签。标题用当前进度百分比，总页数未就绪时回退为「书签 N」。 */
+    fun addBookmark() {
         val book = _book.value ?: return
         val locatorJson = getCurrentLocatorJson()
+        val title = progressPercentLabel(_currentPageIndex.value, _totalPages.value)
+            .ifEmpty { "书签 ${_bookmarks.value.size + 1}" }
         viewModelScope.launch {
             bookmarkRepository.insertBookmark(
-                Bookmark(bookId = book.id, title = title, note = note, locatorJson = locatorJson)
+                Bookmark(bookId = book.id, title = title, note = "", locatorJson = locatorJson)
             )
         }
     }
@@ -996,8 +1007,8 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * 根据书签的 locator 实时计算当前页码标签（如 "189 / 1987"）。
-     * 页码随阅读进度 / 字号重排自动校准；无法解析时返回 null，由调用方回退到书签标题。
+     * 根据书签的 locator 实时计算所在位置的百分比标签（如 "45%"）。
+     * 位置随阅读进度 / 字号重排自动校准；无法解析时返回 null，由调用方回退到书签标题。
      */
     fun bookmarkPageLabel(bookmark: Bookmark): String? {
         val pub = activePublication ?: return null
@@ -1016,7 +1027,7 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
             val prog = loc.locations.progression ?: 0.0
             val pageInChapter = (prog * chCount).toInt().coerceIn(0, chCount - 1)
             val global = counts.take(idx).sum() + pageInChapter
-            "${global + 1} / $total"
+            progressPercentLabel(global, total)
         } catch (_: Exception) { null }
     }
 
@@ -1096,14 +1107,11 @@ class ReaderViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch { annotationRepository.deleteAnnotation(annotationId) }
     }
 
-    /** 批注所在页码标签（如 "189 / 1987"）。页码在创建时固化，跳转用 pageIndex 即可。 */
+    /** 批注 / 划线所在位置的百分比标签（如 "45%"）。位置在创建时固化，跳转用 pageIndex 即可。 */
     fun annotationPageLabel(annotation: Annotation): String {
         val total = _totalPages.value
-        return if (total > 0) {
-            "${annotation.pageIndex.coerceIn(0, total - 1) + 1} / $total"
-        } else {
-            "${annotation.pageIndex + 1}"
-        }
+        if (total <= 0) return ""
+        return progressPercentLabel(annotation.pageIndex.coerceIn(0, total - 1), total)
     }
 
     private fun locatorToJson(locator: Locator): String =

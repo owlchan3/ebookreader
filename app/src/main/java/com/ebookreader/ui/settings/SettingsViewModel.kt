@@ -52,6 +52,14 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     private val _aiEnabled = MutableStateFlow(apiKeyManager.isEnabled())
     val aiEnabled: StateFlow<Boolean> = _aiEnabled.asStateFlow()
 
+    private val _showReadingProgress = MutableStateFlow(apiKeyManager.isShowReadingProgress())
+    val showReadingProgress: StateFlow<Boolean> = _showReadingProgress.asStateFlow()
+
+    fun setShowReadingProgress(show: Boolean) {
+        apiKeyManager.setShowReadingProgress(show)
+        _showReadingProgress.value = show
+    }
+
     private val _apiKey = MutableStateFlow(apiKeyManager.getApiKey())
     val apiKey: StateFlow<String> = _apiKey.asStateFlow()
 

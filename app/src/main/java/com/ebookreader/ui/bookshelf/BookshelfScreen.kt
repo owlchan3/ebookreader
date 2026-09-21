@@ -76,6 +76,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -89,6 +90,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -97,6 +99,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.ebookreader.MainActivity
+import com.ebookreader.di.Injector
 import com.ebookreader.domain.model.Book
 import com.ebookreader.domain.model.Tag
 import com.ebookreader.domain.model.TagGroup
@@ -133,6 +136,20 @@ fun BookshelfScreen(
     val cursorPos by viewModel.cursorPos.collectAsState()
 
     val scope = rememberCoroutineScope()
+
+    // 书库是否显示阅读进度：设置页可改，这里监听偏好变化以便返回书库时立即生效。
+    val context = LocalContext.current
+    var showProgress by remember {
+        mutableStateOf(Injector.apiKeyManager().isShowReadingProgress())
+    }
+    DisposableEffect(Unit) {
+        val prefs = context.getSharedPreferences("ai_plugin_prefs", android.content.Context.MODE_PRIVATE)
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == "bookshelf_show_progress") showProgress = prefs.getBoolean(key, true)
+        }
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+        onDispose { prefs.unregisterOnSharedPreferenceChangeListener(listener) }
+    }
     val gridState = rememberLazyGridState()
     val readTagColors = readTagChipColors()
 
@@ -439,6 +456,7 @@ fun BookshelfScreen(
                                 book = book,
                                 isSelected = book.id in selectedIds,
                                 isSelectionMode = isSelectionMode,
+                                showProgress = showProgress,
                                 onClick = {
                                     if (isSelectionMode) viewModel.toggleSelection(book.id)
                                     else onBookClick(book.id)
@@ -611,6 +629,7 @@ private fun BookCard(
     book: Book,
     isSelected: Boolean,
     isSelectionMode: Boolean,
+    showProgress: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
@@ -648,8 +667,13 @@ private fun BookCard(
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
                         textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                 }
-                if (book.currentPage > 0 && book.totalPages > 0) {
-                    Text("${((book.currentPage + 1).coerceAtMost(book.totalPages)) * 100 / book.totalPages}%",
+                // 始终显示 / 始终不显示由设置页控制：两种状态下所有卡片高度一致。
+                // 未读过的书 totalPages 还是 0，按 0% 显示（与「始终显示」选项说明一致）。
+                if (showProgress) {
+                    val percent = if (book.totalPages > 0)
+                        (book.currentPage + 1).coerceAtMost(book.totalPages) * 100 / book.totalPages
+                    else 0
+                    Text("$percent%",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
                         textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())

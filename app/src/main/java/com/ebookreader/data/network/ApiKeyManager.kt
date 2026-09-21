@@ -217,6 +217,21 @@ class ApiKeyManager(context: Context) {
 
     fun setTtsOpenAiVoice(voice: String) = prefs.edit().putString("tts_openai_voice", voice).apply()
 
+    // ── 书库显示 (Bookshelf display) ───────────────────────────────
+
+    /** 书库卡片是否显示阅读进度百分比（false = 完全不显示，卡片高度保持整齐）。 */
+    fun isShowReadingProgress(): Boolean = prefs.getBoolean("bookshelf_show_progress", true)
+
+    fun setShowReadingProgress(show: Boolean) =
+        prefs.edit().putBoolean("bookshelf_show_progress", show).apply()
+
+    /** 旧书签标题（形如 `189 / 1987`）是否已刷新为百分比；一次性迁移的幂等标记。 */
+    fun isBookmarkLabelMigrated(): Boolean =
+        prefs.getBoolean("bookmark_label_percent_migrated", false)
+
+    fun markBookmarkLabelMigrated() =
+        prefs.edit().putBoolean("bookmark_label_percent_migrated", true).apply()
+
     // ── 智能推荐 (Recommendation) 插件 ─────────────────────────────
 
     fun isRecommendEnabled(): Boolean = prefs.getBoolean("recommend_enabled", false)

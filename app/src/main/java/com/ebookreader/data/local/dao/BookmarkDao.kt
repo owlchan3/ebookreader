@@ -33,6 +33,13 @@ abstract class BookmarkDao {
     @Query("UPDATE bookmarks SET note = :note WHERE id = :bookmarkId")
     abstract suspend fun updateNote(bookmarkId: Long, note: String)
 
+    @Query("UPDATE bookmarks SET title = :title WHERE id = :bookmarkId")
+    abstract suspend fun updateTitle(bookmarkId: Long, title: String)
+
+    /** 早期版本用「189 / 1987」作为书签标题；取出来刷新为百分比。 */
+    @Query("SELECT * FROM bookmarks WHERE title LIKE '%/%'")
+    abstract suspend fun getBookmarksWithSlashTitle(): List<BookmarkEntity>
+
     @Query("SELECT COUNT(*) FROM bookmarks WHERE bookId = :bookId AND locatorJson = :locatorJson")
     abstract suspend fun countByBookAndLocator(bookId: Long, locatorJson: String): Int
 

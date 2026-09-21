@@ -116,6 +116,8 @@ fun SettingsScreen(
     var showPinTagIntro by remember { mutableStateOf(false) }
 
     val aiEnabled by viewModel.aiEnabled.collectAsState()
+    val showReadingProgress by viewModel.showReadingProgress.collectAsState()
+    var showProgressDialog by remember { mutableStateOf(false) }
     val apiKey by viewModel.apiKey.collectAsState()
     val baseUrl by viewModel.baseUrl.collectAsState()
     val decomposeTier by viewModel.decomposeTier.collectAsState()
@@ -402,6 +404,23 @@ fun SettingsScreen(
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
                     }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+            // ── 阅读 ──────────────────────────────────────────────────
+            SettingsSection("阅读")
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+            ) {
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    PluginConfigItem(
+                        "书库显示阅读进度",
+                        if (showReadingProgress) "始终显示" else "始终不显示",
+                        onClick = { showProgressDialog = true },
+                    )
                 }
             }
 
@@ -1326,6 +1345,39 @@ fun SettingsScreen(
             },
             confirmButton = {
                 TextButton(onClick = { showTtsEngineDialog = false }) { Text("关闭") }
+            },
+        )
+    }
+
+    // 书库进度显示 picker dialog
+    if (showProgressDialog) {
+        AlertDialog(
+            onDismissRequest = { showProgressDialog = false },
+            title = { Text("书库显示阅读进度") },
+            text = {
+                Column {
+                    ProviderOption(
+                        selected = showReadingProgress,
+                        title = "始终显示",
+                        subtitle = "所有书籍都显示进度百分比，未读的显示 0%",
+                        onClick = {
+                            viewModel.setShowReadingProgress(true)
+                            showProgressDialog = false
+                        },
+                    )
+                    ProviderOption(
+                        selected = !showReadingProgress,
+                        title = "始终不显示",
+                        subtitle = "卡片只显示书名与作者，高度更整齐",
+                        onClick = {
+                            viewModel.setShowReadingProgress(false)
+                            showProgressDialog = false
+                        },
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showProgressDialog = false }) { Text("关闭") }
             },
         )
     }
