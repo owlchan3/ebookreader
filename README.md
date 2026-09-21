@@ -1,5 +1,7 @@
 # EBookReader
 
+***演示视频：https://www.bilibili.com/video/BV1ZvhB6DE7g***
+
 一款 Android 本地电子书阅读器。不注册账号、不接入广告，书籍文件、标注笔记与阅读统计全部保存在本机；只有在主动开启 AI 助手或推荐插件时，相关内容才会发送到你自己配置的服务。
 
 支持 EPUB、TXT、DOCX、DOC、MOBI、AZW3 与 PDF，提供书签、划线、批注、离线词典、语音朗读、全书问答与 AI 拆书等能力。
